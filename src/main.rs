@@ -1,4 +1,6 @@
 #[cfg(target_os = "macos")]
+mod annotation;
+#[cfg(target_os = "macos")]
 mod capture;
 #[cfg(target_os = "macos")]
 mod macos;

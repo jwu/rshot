@@ -126,7 +126,7 @@ fn native_error(error: *mut NSError, fallback: &str) -> anyhow::Error {
 }
 
 unsafe extern "C-unwind" {
-    fn CGBitmapContextCreate(
+    pub(crate) fn CGBitmapContextCreate(
         data: *mut c_void,
         width: usize,
         height: usize,

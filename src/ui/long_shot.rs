@@ -211,12 +211,12 @@ impl Render for LongShot {
             .gap_2()
             .bg(rgb(BACKGROUND))
             .text_color(rgb(FOREGROUND))
-            .child(
-                div()
-                    .text_color(rgb(ACCENT))
-                    .text_sm()
-                    .child(format!("{width} × {height} px")),
-            )
+            .child(super::ui_label(
+                format!("{width} × {height} px"),
+                ACCENT,
+                13,
+                180,
+            ))
             .child(
                 div()
                     .relative()
@@ -230,13 +230,12 @@ impl Render for LongShot {
                             .object_fit(ObjectFit::Contain),
                     ),
             )
-            .child(
-                div()
-                    .text_sm()
-                    .min_h(px(38.))
-                    .text_color(rgb(MUTED))
-                    .child(self.status.clone()),
-            )
+            .child(div().text_sm().min_h(px(38.)).child(super::ui_label(
+                self.status.clone(),
+                MUTED,
+                13,
+                340,
+            )))
             .child(
                 div()
                     .flex()

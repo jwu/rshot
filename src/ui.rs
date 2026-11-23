@@ -1,4 +1,4 @@
-use std::{path::Path, sync::Arc};
+use std::{cell::RefCell, collections::HashMap, path::Path, sync::Arc};
 
 use anyhow::{Context as _, Result, anyhow, ensure};
 use gpui::{prelude::FluentBuilder, *};
@@ -8,6 +8,7 @@ use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
 use crate::{capture, macos, stitch::Axis};
 
+mod editor;
 mod long_shot;
 
 const BACKGROUND: u32 = 0x101823;
@@ -42,6 +43,54 @@ pub fn run() {
     });
 }
 
+type LabelKey = (SharedString, u32, u32, u32);
+
+thread_local! {
+    static LABEL_TEXTURES: RefCell<HashMap<LabelKey, Arc<RenderImage>>> = RefCell::default();
+}
+
+fn ui_label(text: impl Into<SharedString>, color: u32, size: u32, max_width: u32) -> Div {
+    let text = text.into();
+    if text.is_empty() {
+        return div();
+    }
+    // AppKit shapes the text; GPUI paints it through the color-image atlas.
+    const SCALE: u32 = 2;
+    let texture = LABEL_TEXTURES.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        let key = (text.clone(), color, size, max_width);
+        if let Some(texture) = cache.get(&key) {
+            return Ok(texture.clone());
+        }
+        let image = crate::annotation::interface_text(
+            &text,
+            f64::from(size * SCALE),
+            max_width * SCALE,
+            color,
+        )?;
+        let texture = render_image(image);
+        if cache.len() >= 128 {
+            cache.clear();
+        }
+        cache.insert(key, texture.clone());
+        Ok::<_, anyhow::Error>(texture)
+    });
+    match texture {
+        Ok(texture) => {
+            let size = texture.size(0);
+            div().flex_shrink_0().child(
+                img(texture)
+                    .w(px(size.width.0 as f32 / SCALE as f32))
+                    .h(px(size.height.0 as f32 / SCALE as f32)),
+            )
+        }
+        Err(_) => div()
+            .text_color(rgb(color))
+            .text_size(px(size as f32))
+            .child(text),
+    }
+}
+
 fn button(id: &'static str, label: &'static str, primary: bool) -> Stateful<Div> {
     div()
         .id(id)
@@ -53,9 +102,14 @@ fn button(id: &'static str, label: &'static str, primary: bool) -> Stateful<Div>
         .rounded_md()
         .cursor_pointer()
         .bg(rgb(if primary { ACCENT } else { PANEL }))
-        .text_color(rgb(if primary { BACKGROUND } else { FOREGROUND }))
+        .flex_shrink_0()
         .hover(|style| style.opacity(0.84))
-        .child(label)
+        .child(ui_label(
+            label,
+            if primary { BACKGROUND } else { FOREGROUND },
+            14,
+            180,
+        ))
 }
 
 #[derive(Default)]
@@ -96,15 +150,15 @@ impl Launcher {
         cx.notify();
 
         let task = cx.background_spawn(async move {
-            let windows = macos::windows_on_display(display_id.into());
-            capture::screen(display_id.into(), scale).map(|image| (image, windows))
+            let targets = macos::capture_targets(display_id.into());
+            capture::screen(display_id.into(), scale).map(|image| (image, targets))
         });
         cx.spawn(async move |launcher, cx| {
             let captured = task.await;
             let _ = launcher.update(cx, |launcher, cx| {
                 launcher.busy = false;
-                let result = captured.and_then(|(image, windows)| {
-                    cx.open_window(
+                let result = captured.and_then(|(image, targets)| {
+                    let handle = cx.open_window(
                         WindowOptions {
                             window_bounds: Some(WindowBounds::Windowed(bounds)),
                             display_id: Some(display_id),
@@ -118,10 +172,21 @@ impl Launcher {
                         |window, cx| {
                             cx.new(|cx| {
                                 Selection::new(image, display_id, bounds.size, window, cx)
-                                    .with_windows(windows)
+                                    .with_targets(targets)
                             })
                         },
-                    )
+                    )?;
+                    handle.update(cx, |selection, window, cx| {
+                        if let Err(error) = macos::fit_capture_overlay(window, display_id.into()) {
+                            close_window(window);
+                            return Err(error);
+                        }
+                        selection.hovered =
+                            Some(selection.target_at(window.mouse_position(), bounds.size));
+                        cx.notify();
+                        Ok(())
+                    })??;
+                    Ok(handle)
                 });
                 match result {
                     Ok(handle) => {
@@ -188,7 +253,7 @@ impl Render for Launcher {
                 div()
                     .text_xl()
                     .font_weight(FontWeight::SEMIBOLD)
-                    .child("截图与贴图"),
+                    .child(ui_label("截图与贴图", FOREGROUND, 20, 340)),
             )
             .child(
                 div()
@@ -211,12 +276,12 @@ impl Render for Launcher {
                     )),
             )
             .when(!self.status.is_empty(), |root| {
-                root.child(
-                    div()
-                        .text_sm()
-                        .text_color(rgb(MUTED))
-                        .child(self.status.clone()),
-                )
+                root.child(div().text_sm().text_color(rgb(MUTED)).child(ui_label(
+                    self.status.clone(),
+                    MUTED,
+                    13,
+                    350,
+                )))
             })
     }
 }
@@ -229,7 +294,7 @@ fn render_image(mut image: RgbaImage) -> Arc<RenderImage> {
     Arc::new(RenderImage::new([Frame::new(image)]))
 }
 
-fn png_bytes(image: &RgbaImage) -> Result<Vec<u8>> {
+pub(crate) fn png_bytes(image: &RgbaImage) -> Result<Vec<u8>> {
     let mut png = Vec::new();
     PngEncoder::new(&mut png).write_image(
         image.as_raw(),
@@ -286,6 +351,7 @@ enum Output {
     Copy,
     Save,
     Pin,
+    Edit,
     Long(Axis),
 }
 
@@ -297,6 +363,7 @@ struct Selection {
     scale: f32,
     focus: FocusHandle,
     drag: Option<(Point<Pixels>, Point<Pixels>)>,
+    menu_bar: Option<Bounds<Pixels>>,
     windows: Vec<Bounds<Pixels>>,
     hovered: Option<Bounds<Pixels>>,
     selection: Option<Bounds<Pixels>>,
@@ -322,6 +389,7 @@ impl Selection {
             scale: window.scale_factor(),
             focus,
             drag: None,
+            menu_bar: None,
             windows: Vec::new(),
             hovered: None,
             selection: None,
@@ -330,34 +398,30 @@ impl Selection {
         }
     }
 
-    fn with_windows(mut self, windows: Vec<objc2_core_foundation::CGRect>) -> Self {
-        self.windows = windows
-            .into_iter()
-            .map(|rect| Bounds {
-                origin: point(px(rect.origin.x as f32), px(rect.origin.y as f32)),
-                size: size(px(rect.size.width as f32), px(rect.size.height as f32)),
-            })
-            .collect();
+    fn with_targets(mut self, targets: macos::CaptureTargets) -> Self {
+        let convert = |rect: objc2_core_foundation::CGRect| Bounds {
+            origin: point(px(rect.origin.x as f32), px(rect.origin.y as f32)),
+            size: size(px(rect.size.width as f32), px(rect.size.height as f32)),
+        };
+        self.menu_bar = targets.menu_bar.map(convert);
+        self.windows = targets.windows.into_iter().map(convert).collect();
         self
     }
 
-    fn hit_window(&self, position: Point<Pixels>) -> Option<Bounds<Pixels>> {
-        self.windows.iter().copied().find(|bounds| {
-            position.x >= bounds.origin.x
-                && position.x < bounds.origin.x + bounds.size.width
-                && position.y >= bounds.origin.y
-                && position.y < bounds.origin.y + bounds.size.height
-        })
+    fn target_at(&self, position: Point<Pixels>, view: Size<Pixels>) -> Bounds<Pixels> {
+        capture_target_at(self.menu_bar, &self.windows, position, view)
     }
 
     fn finish(&mut self, output: Output, window: &mut Window, cx: &mut Context<Self>) {
-        if self.saving {
+        if self.saving || self.drag.is_some() {
             return;
         }
-        let Some(rect) = self.selection else {
-            return;
-        };
-        let [x, y, width, height] = crop_bounds(rect, window.viewport_size(), &self.image);
+        let view = window.viewport_size();
+        let rect = self.selection.or(self.hovered).unwrap_or(Bounds {
+            origin: point(px(0.), px(0.)),
+            size: view,
+        });
+        let [x, y, width, height] = crop_bounds(rect, view, &self.image);
         if width == 0 || height == 0 {
             return;
         }
@@ -383,6 +447,12 @@ impl Selection {
                 Err(error) => self.report(error, cx),
             },
             Output::Save => self.save(cropped, window, cx),
+            Output::Edit => {
+                match editor::open(cropped, self.scale, self.display_id, self.screen_size, cx) {
+                    Ok(()) => close_window(window),
+                    Err(error) => self.report(error, cx),
+                }
+            }
             Output::Long(axis) => {
                 let shot = long_shot::LongShot::new(
                     axis,
@@ -470,6 +540,27 @@ fn hide_native_window(window: &Window) -> Result<()> {
     Ok(())
 }
 
+fn capture_target_at(
+    menu_bar: Option<Bounds<Pixels>>,
+    windows: &[Bounds<Pixels>],
+    position: Point<Pixels>,
+    view: Size<Pixels>,
+) -> Bounds<Pixels> {
+    menu_bar
+        .into_iter()
+        .chain(windows.iter().copied())
+        .find(|bounds| {
+            position.x >= bounds.origin.x
+                && position.x < bounds.origin.x + bounds.size.width
+                && position.y >= bounds.origin.y
+                && position.y < bounds.origin.y + bounds.size.height
+        })
+        .unwrap_or(Bounds {
+            origin: point(px(0.), px(0.)),
+            size: view,
+        })
+}
+
 impl Render for Selection {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let view = window.viewport_size();
@@ -500,6 +591,7 @@ impl Render for Selection {
                     ("c", true) | ("enter", false) => this.finish(Output::Copy, window, cx),
                     ("s", true) => this.finish(Output::Save, window, cx),
                     ("p", true) => this.finish(Output::Pin, window, cx),
+                    ("e", false) | ("e", true) => this.finish(Output::Edit, window, cx),
                     _ => return,
                 }
                 cx.stop_propagation();
@@ -516,14 +608,16 @@ impl Render for Selection {
                     cx.notify();
                 }),
             )
-            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
-                let hovered = this.hit_window(event.position);
+            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
                 if let Some((_, end)) = &mut this.drag {
                     *end = event.position;
                     cx.notify();
-                } else if this.selection.is_none() && this.hovered != hovered {
-                    this.hovered = hovered;
-                    cx.notify();
+                } else if this.selection.is_none() {
+                    let hovered = Some(this.target_at(event.position, window.viewport_size()));
+                    if this.hovered != hovered {
+                        this.hovered = hovered;
+                        cx.notify();
+                    }
                 }
             }))
             .on_mouse_up(
@@ -534,7 +628,7 @@ impl Render for Selection {
                         let movement = ((event.position.x - start.x).abs())
                             .max((event.position.y - start.y).abs());
                         this.selection = if movement < px(3.) {
-                            this.hit_window(event.position)
+                            Some(this.target_at(event.position, window.viewport_size()))
                         } else if rect.size.width >= px(1.) && rect.size.height >= px(1.) {
                             Some(rect)
                         } else {
@@ -570,7 +664,10 @@ impl Render for Selection {
         let mut controls = div()
             .id("capture-actions")
             .absolute()
-            .top(px(30.))
+            .top(
+                self.menu_bar
+                    .map_or(px(30.), |bar| bar.size.height + px(8.)),
+            )
             .left(px(20.))
             .flex()
             .items_center()
@@ -580,12 +677,15 @@ impl Render for Selection {
             .bg(rgb(BACKGROUND))
             .text_color(rgb(FOREGROUND))
             .text_sm()
-            .child(div().px_2().child(label));
+            .child(div().px_2().child(ui_label(label, FOREGROUND, 13, 330)));
         if self.selection.is_some() {
             controls = controls
                 .cursor_default()
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .child(button("copy", "复制", true).on_click(
+                .child(button("edit", "编辑", true).on_click(
+                    cx.listener(|this, _, window, cx| this.finish(Output::Edit, window, cx)),
+                ))
+                .child(button("copy", "复制", false).on_click(
                     cx.listener(|this, _, window, cx| this.finish(Output::Copy, window, cx)),
                 ))
                 .child(
@@ -629,7 +729,7 @@ impl Render for Selection {
                     .rounded_md()
                     .bg(rgb(BACKGROUND))
                     .text_color(rgb(FOREGROUND))
-                    .child(self.status.clone()),
+                    .child(ui_label(self.status.clone(), FOREGROUND, 14, 420)),
             )
         })
     }
@@ -766,10 +866,48 @@ impl Render for Pin {
 
 #[cfg(test)]
 mod tests {
-    use gpui::{point, px, size};
+    use gpui::{Bounds, point, px, size};
     use image::RgbaImage;
 
-    use super::{crop_bounds, png_bytes, selection_rect};
+    use super::{capture_target_at, crop_bounds, png_bytes, selection_rect};
+
+    #[test]
+    fn capture_prefers_menu_and_frontmost_window_then_falls_back_to_full_screen() {
+        let view = size(px(100.), px(80.));
+        let screen = Bounds {
+            origin: point(px(0.), px(0.)),
+            size: view,
+        };
+        let menu = Bounds {
+            size: size(px(100.), px(5.)),
+            ..screen
+        };
+        let front = Bounds {
+            origin: point(px(10.), px(4.)),
+            size: size(px(30.), px(30.)),
+        };
+        let back = Bounds {
+            origin: point(px(5.), px(4.)),
+            size: size(px(60.), px(45.)),
+        };
+        let windows = &[front, back];
+        assert_eq!(
+            capture_target_at(Some(menu), windows, point(px(20.), px(4.)), view),
+            menu
+        );
+        assert_eq!(
+            capture_target_at(Some(menu), windows, point(px(20.), px(5.)), view),
+            front
+        );
+        assert_eq!(
+            capture_target_at(None, windows, point(px(90.), px(50.)), view),
+            screen
+        );
+        assert_eq!(
+            crop_bounds(menu, view, &RgbaImage::new(200, 160)),
+            [0, 0, 200, 10]
+        );
+    }
 
     #[test]
     fn reversed_drag_is_clipped_and_converted_to_retina_pixels() {

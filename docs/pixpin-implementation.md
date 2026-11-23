@@ -13,6 +13,8 @@
 - `libUiRegionDetector` 的 `DirectGetRect` 在 `0x3960` 创建系统级 Accessibility 对象，在 `0x3980` 用 `AXUIElementCopyElementAtPosition` 查询鼠标位置的元素。同库导入 `AXUIElementCopyAttributeValue`，并暴露父、子元素矩形查询、仅窗口模式及缓存重置接口。这说明命中区域的主要输入是辅助功能对象及其几何信息。
 - `libPixWindowNotify` 在 `0x33cc` 调用 `CGWindowListCopyWindowInfo`，还引用窗口编号、层级和所属进程字段。Rshot 可以用窗口列表实现窗口级候选，再把 Accessibility 查询用于细粒度选区。当前证据没有覆盖 PixPin 对各类应用的全部降级规则。
 
+- 选区控件 `TrigerGraphicRectSelectItem::hoverMoveEvent` 调用异步 `AsyncGetWinRectByPoint`，`getUiRegionDetectorRect` 也有同步查询路径。应用候选时会先调整矩形，再更新选区。另有 `selectScreen(QPoint)`，按鼠标位置查询 `screenAt`，其中存在使用 `wholeRect` 的路径。实测 PixPin 3.6.6.0 在顶部菜单栏空白处可选中整个 `1920 × 30` 菜单栏。静态结果还未确认该矩形的具体来源。Rshot 从 CoreGraphics 的主菜单窗口层读取其实际边界。 [悬停调用证据](#rea-证据索引)
+
 ## 贴图、历史与全局输入
 
 - 贴图由 `PinWindowBase` 及不同内容窗口管理。`PinWindowBase::setMousePenetration` 在 `0x1000f42d4` 调用 `libPixSystemUtils` 的 `SetWindowIgnoreMouse(QWidget*, bool)`。该函数从 `QWidget::winId()` 取得原生视图并访问窗口，同库包含 AppKit 的 `setIgnoresMouseEvents:`。置顶另有 `PinWindowTopmostState` 和 `refreshTopmostState`。
@@ -50,6 +52,7 @@
 | `libPixScreenManager` 反汇编 | `ev_f8c97ad741c8a9a14de77a4ec2cf955464fe4281198e1c091838990def625fc2` |
 | `libUiRegionDetector` 反汇编 | `ev_9be94b68f266c443d01984ae95126f141db7cc4aebab548ed13e1029f3e4ec0b` |
 | `libPixWindowNotify` 反汇编 | `ev_88fc2e2460f975ef3818175f255fc50ad527a788871e0f34b41e54481f23071e` |
+| 选区控件悬停与选择显示器 | `ev_336cfdfed80612cf843055e55df938b9db4538e39605a04d72b630c04952a203`、`ev_9b402577c6fc8e669a4f0f187de50c470f0293c88af51f2b3fafa1e1f3fe4c7a` |
 | 贴图穿透调用 | `ev_50595025693c9c0b31a01ce478c0db3e240531dbc2953e0f8dc66428f44e616e` |
 | 原生窗口辅助函数 | `ev_97787a57091209b3a0e07533b832ac9eb03fb818605c76bc77ccab16d3dcb073` |
 | 贴图数据库构造 | `ev_f77cc975f86717cf57d30c4bd318529a407059038d305f55a291a1177a937c4a` |
