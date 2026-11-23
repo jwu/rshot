@@ -1,0 +1,19 @@
+[package]
+name = "rshot"
+version = "0.1.0"
+edition = "2024"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+anyhow = "1"
+block2 = "0.6"
+gpui = { version = "0.2.2", default-features = false, features = ["runtime_shaders"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "tiff"] }
+objc2 = "0.6"
+objc2-core-foundation = "0.3"
+objc2-core-graphics = "0.3"
+objc2-foundation = "0.3"
+objc2-screen-capture-kit = "0.3"
+raw-window-handle = "0.6"
+
+[profile.dev]
+debug = "line-tables-only"
