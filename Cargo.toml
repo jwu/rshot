@@ -5,6 +5,10 @@ resolver = "3"
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
+description = "Screenshot capture and annotation for macOS"
+repository = "https://github.com/jwu/rshot"
+rust-version = "1.99.1"
+license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
 anyhow = "1"
