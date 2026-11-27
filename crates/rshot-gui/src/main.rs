@@ -3,6 +3,9 @@ mod macos;
 #[cfg(target_os = "macos")]
 mod ui;
 
+#[global_allocator]
+static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 fn main() {
     #[cfg(target_os = "macos")]
     ui::run();

@@ -46,14 +46,21 @@ pub fn run() {
             cx.quit();
             return;
         }
-        cx.on_window_closed(|cx| {
-            if cx.windows().is_empty() {
-                cx.quit();
-            }
-        })
-        .detach();
+        observe_window_closures(cx);
         cx.activate(true);
     });
+}
+
+fn observe_window_closures(cx: &App) {
+    cx.on_window_closed(|cx| match cx.windows().as_slice() {
+        [] => cx.quit(),
+        [window] if window.downcast::<Launcher>().is_some() => cx.defer(|_| {
+            // SAFETY: The UI thread owns the default heap. Deferring lets GPUI drop the view first.
+            unsafe { libmimalloc_sys::mi_collect(true) };
+        }),
+        _ => {}
+    })
+    .detach();
 }
 
 type LabelKey = (SharedString, u32, u32, u32);

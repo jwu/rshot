@@ -11,6 +11,10 @@ license.workspace = true
 name = "rshot"
 path = "src/main.rs"
 
+[dependencies]
+libmimalloc-sys = { version = "0.1.49", features = ["extended"] }
+mimalloc = "0.1.52"
+
 [target.'cfg(target_os = "macos")'.dependencies]
 anyhow.workspace = true
 block2.workspace = true
