@@ -61,6 +61,28 @@ pub struct WindowInfo {
     pub is_on_screen: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CaptureSource {
+    Display,
+    Region,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CaptureMetadata {
+    pub source: CaptureSource,
+    pub display_id: Option<u32>,
+    pub scale_factor: f64,
+    /// Captured bounds in global points, with a top-left origin.
+    pub bounds: Rect<f64>,
+    pub pixel_size: Size<u32>,
+}
+
+#[derive(Debug)]
+pub struct CapturedImage {
+    pub image: RgbaImage,
+    pub metadata: CaptureMetadata,
+}
+
 /// Display-local bounds in logical coordinates, with windows ordered front to back.
 #[derive(Default)]
 pub struct CaptureTargets {
