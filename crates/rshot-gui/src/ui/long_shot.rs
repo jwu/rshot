@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use anyhow::{Context as _, Result, anyhow};
 use gpui::*;
 use image::RgbaImage;
@@ -27,7 +29,7 @@ pub(super) struct LongShot {
 impl LongShot {
     pub(super) fn new(
         axis: Axis,
-        first: RgbaImage,
+        first: Arc<RgbaImage>,
         display: DisplayId,
         scale: f32,
         region: Rect<u32>,

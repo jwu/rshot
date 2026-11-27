@@ -26,10 +26,12 @@ const MARGIN: f32 = 16.;
 const GUIDE_COLOR: u32 = 0xff5566;
 
 pub(super) fn open(
-    image: RgbaImage,
+    image: Arc<RgbaImage>,
+    texture: Option<Arc<RenderImage>>,
     scale: f32,
     display: DisplayId,
     screen: Size<Pixels>,
+    on_open: impl FnOnce(),
     cx: &mut App,
 ) -> Result<()> {
     let width = px(960.).min(screen.width - px(32.)).max(px(1.));
@@ -50,10 +52,11 @@ pub(super) fn open(
             ..Default::default()
         },
         |window, cx| {
+            on_open();
             cx.new(|cx| {
                 let focus = cx.focus_handle();
                 focus.focus(window);
-                let texture = render_image(image.clone());
+                let texture = texture.unwrap_or_else(|| render_image((*image).clone()));
                 Editor {
                     document: Document::new(image),
                     texture: Preview::new(texture),

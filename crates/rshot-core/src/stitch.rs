@@ -1,4 +1,4 @@
-use std::{collections::VecDeque, ops::Range};
+use std::{collections::VecDeque, ops::Range, sync::Arc};
 
 use image::{
     RgbaImage,
@@ -34,9 +34,7 @@ impl Axis {
     fn orient(self, image: RgbaImage) -> RgbaImage {
         match self {
             Self::Vertical => image,
-            Self::Horizontal => {
-                RgbaImage::from_fn(image.height(), image.width(), |x, y| *image.get_pixel(y, x))
-            }
+            Self::Horizontal => transpose(&image),
         }
     }
 }
@@ -51,7 +49,7 @@ pub enum Progress {
 
 pub struct Stitcher {
     axis: Axis,
-    previous: RgbaImage,
+    previous: Arc<RgbaImage>,
     edges: Option<(RgbaImage, RgbaImage)>,
     chunks: VecDeque<RgbaImage>,
     position: i64,
@@ -60,8 +58,12 @@ pub struct Stitcher {
 }
 
 impl Stitcher {
-    pub fn new(axis: Axis, first: RgbaImage) -> Result<Self, StitchError> {
-        let previous = axis.orient(first);
+    pub fn new(axis: Axis, first: impl Into<Arc<RgbaImage>>) -> Result<Self, StitchError> {
+        let first = first.into();
+        let previous = match axis {
+            Axis::Vertical => first,
+            Axis::Horizontal => transpose(&first).into(),
+        };
         if previous.width() < 8 || previous.height() < 32 {
             return Err(StitchError::RegionTooSmall);
         }
@@ -84,7 +86,7 @@ impl Stitcher {
         if frame.dimensions() != self.previous.dimensions() {
             return Err(StitchError::FrameResized);
         }
-        if frame == self.previous {
+        if frame == *self.previous {
             return Ok(Progress::Unchanged);
         }
         let a = sample_rows(&self.previous);
@@ -135,7 +137,7 @@ impl Stitcher {
                 .push_back(strip(&frame, height - tail - count..height - tail));
         }
         let extended = new_start < self.start || new_end > end;
-        self.previous = frame;
+        self.previous = frame.into();
         self.position = position;
         self.start = new_start;
         self.end = new_end;
@@ -149,7 +151,7 @@ impl Stitcher {
     fn strips(&self) -> impl Iterator<Item = &RgbaImage> {
         let (head, tail) = match &self.edges {
             Some((head, tail)) => (head, Some(tail)),
-            None => (&self.previous, None),
+            None => (self.previous.as_ref(), None),
         };
         std::iter::once(head).chain(&self.chunks).chain(tail)
     }
@@ -212,6 +214,10 @@ impl Stitcher {
         }
         self.axis.orient(preview)
     }
+}
+
+fn transpose(image: &RgbaImage) -> RgbaImage {
+    RgbaImage::from_fn(image.height(), image.width(), |x, y| *image.get_pixel(y, x))
 }
 
 fn strip(image: &RgbaImage, rows: Range<u32>) -> RgbaImage {

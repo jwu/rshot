@@ -8,7 +8,7 @@ use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
 use rshot_core::{
     annotation,
-    capture::{CaptureBackend, CaptureTargets, MacOsCapture, crop},
+    capture::{CaptureBackend, CaptureError, CaptureTargets, MacOsCapture, crop},
     geometry::Rect,
     png,
     stitch::Axis,
@@ -216,7 +216,7 @@ impl Launcher {
                 _ => None,
             }) {
                 let image = image::load_from_memory(&image.bytes).context("无法读取剪贴板图片")?;
-                PinContent::Image(image.to_rgba8())
+                PinContent::Image(image.into_rgba8().into())
             } else {
                 let text = item
                     .text()
@@ -351,9 +351,32 @@ enum Output {
     Long(Axis),
 }
 
-struct Selection {
-    image: RgbaImage,
+#[derive(Default, PartialEq, Eq)]
+enum SelectionWork {
+    #[default]
+    Idle,
+    Copy,
+    Save,
+}
+
+struct CaptureFrame {
+    image: Arc<RgbaImage>,
     texture: Arc<RenderImage>,
+}
+
+fn crop_selection(
+    image: &Arc<RgbaImage>,
+    region: Rect<u32>,
+) -> Result<Arc<RgbaImage>, CaptureError> {
+    let (width, height) = image.dimensions();
+    if width > 0 && height > 0 && region == Rect::new(0, 0, width, height) {
+        return Ok(image.clone());
+    }
+    crop(image, region).map(Arc::new)
+}
+
+struct Selection {
+    frame: Option<CaptureFrame>,
     display_id: DisplayId,
     screen_size: Size<Pixels>,
     scale: f32,
@@ -363,7 +386,7 @@ struct Selection {
     windows: Vec<Bounds<Pixels>>,
     hovered: Option<Bounds<Pixels>>,
     selection: Option<Bounds<Pixels>>,
-    saving: bool,
+    work: SelectionWork,
     status: SharedString,
 }
 
@@ -378,8 +401,10 @@ impl Selection {
         let focus = cx.focus_handle();
         focus.focus(window);
         Self {
-            texture: render_image(image.clone()),
-            image,
+            frame: Some(CaptureFrame {
+                texture: render_image(image.clone()),
+                image: image.into(),
+            }),
             display_id,
             screen_size,
             scale: window.scale_factor(),
@@ -389,7 +414,7 @@ impl Selection {
             windows: Vec::new(),
             hovered: None,
             selection: None,
-            saving: false,
+            work: SelectionWork::Idle,
             status: "".into(),
         }
     }
@@ -409,27 +434,23 @@ impl Selection {
     }
 
     fn finish(&mut self, output: Output, window: &mut Window, cx: &mut Context<Self>) {
-        if self.saving || self.drag.is_some() {
+        if self.work != SelectionWork::Idle || self.drag.is_some() {
             return;
         }
+        let Some(frame) = &self.frame else {
+            return;
+        };
         let view = window.viewport_size();
         let rect = self.selection.or(self.hovered).unwrap_or(Bounds {
             origin: point(px(0.), px(0.)),
             size: view,
         });
-        let region = crop_bounds(rect, view, &self.image);
-        let Ok(cropped) = crop(&self.image, region) else {
+        let region = crop_bounds(rect, view, &frame.image);
+        let Ok(cropped) = crop_selection(&frame.image, region) else {
             return;
         };
         match output {
-            Output::Copy => match png::encode(&cropped) {
-                Ok(bytes) => {
-                    let image = Image::from_bytes(ImageFormat::Png, bytes);
-                    cx.write_to_clipboard(ClipboardItem::new_image(&image));
-                    close_window(window);
-                }
-                Err(error) => self.report(error.into(), cx),
-            },
+            Output::Copy => self.copy(cropped, window, cx),
             Output::Pin => match open_pin(
                 PinContent::Image(cropped),
                 self.display_id,
@@ -443,9 +464,20 @@ impl Selection {
             },
             Output::Save => self.save(cropped, window, cx),
             Output::Edit => {
-                match editor::open(cropped, self.scale, self.display_id, self.screen_size, cx) {
-                    Ok(()) => close_window(window),
-                    Err(error) => self.report(error, cx),
+                let texture = Arc::ptr_eq(&cropped, &frame.image).then(|| frame.texture.clone());
+                if let Err(error) = editor::open(
+                    cropped,
+                    texture,
+                    self.scale,
+                    self.display_id,
+                    self.screen_size,
+                    || {
+                        close_window(window);
+                        self.frame.take();
+                    },
+                    cx,
+                ) {
+                    self.report(error, cx);
                 }
             }
             Output::Long(axis) => {
@@ -455,7 +487,7 @@ impl Selection {
                     self.display_id,
                     self.scale,
                     region,
-                    self.image.dimensions(),
+                    frame.image.dimensions(),
                 );
                 match shot.and_then(|shot| shot.open(rect, self.screen_size, cx)) {
                     Ok(()) => close_window(window),
@@ -470,12 +502,34 @@ impl Selection {
         cx.notify();
     }
 
-    fn save(&mut self, image: RgbaImage, window: &mut Window, cx: &mut Context<Self>) {
+    fn copy(&mut self, image: Arc<RgbaImage>, window: &Window, cx: &mut Context<Self>) {
+        self.work = SelectionWork::Copy;
+        self.status = "正在生成 PNG…".into();
+        cx.notify();
+        let task = cx.background_spawn(async move { png::encode(&image) });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = task.await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.work = SelectionWork::Idle;
+                match result {
+                    Ok(bytes) => {
+                        let image = Image::from_bytes(ImageFormat::Png, bytes);
+                        cx.write_to_clipboard(ClipboardItem::new_image(&image));
+                        close_window(window);
+                    }
+                    Err(error) => this.report(error.into(), cx),
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn save(&mut self, image: Arc<RgbaImage>, window: &mut Window, cx: &mut Context<Self>) {
         if let Err(error) = hide_native_window(window) {
             self.report(error, cx);
             return;
         }
-        self.saving = true;
+        self.work = SelectionWork::Save;
         self.status = "".into();
         cx.notify();
         let directory = std::env::home_dir().unwrap_or_else(|| Path::new(".").into());
@@ -494,7 +548,7 @@ impl Selection {
                 Err(error) => Err(anyhow!(error)),
             };
             let _ = this.update_in(cx, |this, window, cx| {
-                this.saving = false;
+                this.work = SelectionWork::Idle;
                 match result {
                     Ok(true) => window.remove_window(),
                     Ok(false) => {
@@ -557,6 +611,9 @@ fn capture_target_at(
 
 impl Render for Selection {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let Some(frame) = &self.frame else {
+            return div();
+        };
         let view = window.viewport_size();
         let rect = self
             .drag
@@ -571,7 +628,7 @@ impl Render for Selection {
             .bg(rgb(BACKGROUND))
             .cursor_crosshair()
             .child(
-                img(self.texture.clone())
+                img(frame.texture.clone())
                     .absolute()
                     .size_full()
                     .object_fit(ObjectFit::Fill),
@@ -581,7 +638,7 @@ impl Render for Selection {
                     event.keystroke.key.as_str(),
                     event.keystroke.modifiers.platform,
                 ) {
-                    ("escape", _) if !this.saving => close_window(window),
+                    ("escape", _) if this.work == SelectionWork::Idle => close_window(window),
                     ("c", true) | ("enter", false) => this.finish(Output::Copy, window, cx),
                     ("s", true) => this.finish(Output::Save, window, cx),
                     ("p", true) => this.finish(Output::Pin, window, cx),
@@ -593,7 +650,7 @@ impl Render for Selection {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, event: &MouseDownEvent, _, cx| {
-                    if this.saving {
+                    if this.work != SelectionWork::Idle {
                         return;
                     }
                     this.drag = Some((event.position, event.position));
@@ -650,7 +707,7 @@ impl Render for Selection {
         }
 
         let label: SharedString = if let Some(rect) = rect {
-            let region = crop_bounds(rect, view, &self.image);
+            let region = crop_bounds(rect, view, &frame.image);
             format!("{} × {} px", region.size.width, region.size.height).into()
         } else {
             "点击选取窗口或拖动框选 · Esc 退出".into()
@@ -679,13 +736,24 @@ impl Render for Selection {
                 .child(button("edit", "编辑", true).on_click(
                     cx.listener(|this, _, window, cx| this.finish(Output::Edit, window, cx)),
                 ))
-                .child(button("copy", "复制", false).on_click(
-                    cx.listener(|this, _, window, cx| this.finish(Output::Copy, window, cx)),
-                ))
+                .child(
+                    button(
+                        "copy",
+                        if self.work == SelectionWork::Copy {
+                            "复制中…"
+                        } else {
+                            "复制"
+                        },
+                        false,
+                    )
+                    .on_click(
+                        cx.listener(|this, _, window, cx| this.finish(Output::Copy, window, cx)),
+                    ),
+                )
                 .child(
                     button(
                         "save",
-                        if self.saving {
+                        if self.work == SelectionWork::Save {
                             "保存中…"
                         } else {
                             "保存 PNG"
@@ -730,7 +798,7 @@ impl Render for Selection {
 }
 
 enum PinContent {
-    Image(RgbaImage),
+    Image(Arc<RgbaImage>),
     Text(SharedString),
 }
 
@@ -761,7 +829,10 @@ fn open_pin(
                 px(image.width() as f32 / scale),
                 px(image.height() as f32 / scale),
             );
-            (PinView::Image(render_image(image)), dimensions)
+            (
+                PinView::Image(render_image(Arc::unwrap_or_clone(image))),
+                dimensions,
+            )
         }
         PinContent::Text(text) => (PinView::Text(text), size(px(340.), px(180.))),
     };
@@ -861,9 +932,35 @@ impl Render for Pin {
 #[cfg(test)]
 mod tests {
     use gpui::{Bounds, point, px, size};
-    use image::RgbaImage;
+    use std::sync::Arc;
 
-    use super::{Rect, capture_target_at, crop_bounds, selection_rect};
+    use image::{Rgba, RgbaImage};
+    use rshot_core::{capture::crop, png};
+
+    use super::{Rect, capture_target_at, crop_bounds, crop_selection, selection_rect};
+
+    #[test]
+    fn full_selection_reuses_pixels_and_both_exports_match_the_previous_crop() {
+        let image = Arc::new(RgbaImage::from_fn(5, 4, |x, y| {
+            Rgba([(x * 40) as u8, (y * 70) as u8, (x + y) as u8, 127])
+        }));
+        let full = Rect::new(0, 0, 5, 4);
+        let path = std::env::temp_dir().join(format!("rshot-selection-{}.png", std::process::id()));
+        for region in [full, Rect::new(1, 2, 4, 2), Rect::new(0, 0, 1, 1)] {
+            let expected = crop(&image, region).unwrap();
+            let selected = crop_selection(&image, region).unwrap();
+            assert_eq!(Arc::ptr_eq(&image, &selected), region == full);
+            let encoded = png::encode(&selected).unwrap();
+            assert_eq!(
+                image::load_from_memory(&encoded).unwrap().into_rgba8(),
+                expected
+            );
+            png::save(&selected, &path).unwrap();
+            assert_eq!(image::open(&path).unwrap().into_rgba8(), expected);
+            std::fs::remove_file(&path).unwrap();
+        }
+        assert!(crop_selection(&image, Rect::new(0, 0, 0, 4)).is_err());
+    }
 
     #[test]
     fn capture_prefers_menu_and_frontmost_window_then_falls_back_to_full_screen() {

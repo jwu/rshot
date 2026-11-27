@@ -71,8 +71,8 @@ pub struct Document {
 }
 
 impl Document {
-    pub fn new(source: RgbaImage) -> Self {
-        let source = Arc::new(source);
+    pub fn new(source: impl Into<Arc<RgbaImage>>) -> Self {
+        let source = source.into();
         Self {
             result: Arc::clone(&source),
             source,
