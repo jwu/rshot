@@ -2,7 +2,7 @@ use image::{Rgba, RgbaImage};
 use serde::Serialize;
 use tiny_skia::{FillRule, Mask, Path, PathBuilder, Transform};
 
-use super::spec::{AnnotateError, Color, MarkKind, MarkSpec, Spec, step_number};
+use super::spec::{AnnotateError, Color, HighlightBlend, MarkKind, MarkSpec, Spec, step_number};
 use super::{LineCoverage, arrow_segments};
 use crate::geometry::{Point, Rect};
 
@@ -117,10 +117,8 @@ pub fn render(image: &RgbaImage, spec: &Spec) -> Result<Rendered, AnnotateError>
                 (area, "at")
             }
             MarkSpec::Highlight(mark) => {
-                let mut color = mark.color;
-                color.0[3] = (f64::from(color.0[3]) * mark.opacity).round() as u8;
                 let area = widen(mark.rect);
-                canvas.solid(area, color, false);
+                canvas.highlight(area, mark.color, mark.opacity, mark.blend);
                 (area, "rect")
             }
             MarkSpec::Redact(mark) => {
@@ -233,25 +231,51 @@ impl Canvas<'_> {
         });
     }
 
+    fn highlight(&mut self, area: Rect<i64>, mut color: Color, opacity: f64, mode: HighlightBlend) {
+        color.0[3] = (f64::from(color.0[3]) * opacity).round() as u8;
+        if color.0[3] == 0 {
+            return;
+        }
+        let region = area.clip(self.image.dimensions());
+        let Point { x, y } = region.origin;
+        for row in y..y + region.size.height {
+            for col in x..x + region.size.width {
+                self.blend_with_mode(col, row, Rgba(color.0), mode);
+            }
+        }
+    }
+
     fn blend(&mut self, x: u32, y: u32, color: Rgba<u8>) {
+        self.blend_with_mode(x, y, color, HighlightBlend::Normal);
+    }
+
+    fn blend_with_mode(&mut self, x: u32, y: u32, color: Rgba<u8>, mode: HighlightBlend) {
         let alpha = u32::from(color[3]);
         if alpha == 0 {
             return;
         }
         self.include(x, y);
         let destination = self.image.get_pixel_mut(x, y);
-        if alpha == 255 {
+        if alpha == 255 && mode == HighlightBlend::Normal {
             *destination = color;
             return;
         }
+        let backdrop_alpha = u32::from(destination[3]);
         let source_weight = alpha * 255;
-        let destination_weight = u32::from(destination[3]) * (255 - alpha);
+        let destination_weight = backdrop_alpha * (255 - alpha);
         let weight = source_weight + destination_weight;
+        let divisor = weight * 255;
         for (out, source) in destination.0[..3].iter_mut().zip(color.0) {
-            *out = ((u32::from(source) * source_weight
-                + u32::from(*out) * destination_weight
-                + weight / 2)
-                / weight) as u8;
+            let backdrop = u32::from(*out);
+            let source = u32::from(source);
+            let source_contribution = match mode {
+                HighlightBlend::Multiply => {
+                    source * alpha * ((255 - backdrop_alpha) * 255 + backdrop_alpha * backdrop)
+                }
+                HighlightBlend::Normal => source * source_weight * 255,
+            };
+            *out = ((source_contribution + backdrop * destination_weight * 255 + divisor / 2)
+                / divisor) as u8;
         }
         destination[3] = ((weight + 127) / 255) as u8;
     }

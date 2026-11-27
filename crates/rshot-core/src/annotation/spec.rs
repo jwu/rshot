@@ -302,6 +302,16 @@ pub struct HighlightSpec {
     pub color: Color,
     #[serde(default = "highlight_opacity")]
     pub opacity: f64,
+    #[serde(default)]
+    pub blend: HighlightBlend,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HighlightBlend {
+    #[default]
+    Multiply,
+    Normal,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]

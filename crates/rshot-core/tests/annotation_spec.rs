@@ -23,7 +23,7 @@ fn spec_round_trips_with_defaults_and_canonical_colors() {
         {"type":"arrow", "from":{"x":180,"y":180}, "to":{"x":290,"y":100}, "stroke":"#E63946", "width":4},
         {"type":"text", "at":{"x":52,"y":155}, "text":"", "size":22, "color":"#111111", "background":"#FFFFFFCC"},
         {"type":"step", "at":{"x":28,"y":170}, "n":null, "size":28, "fill":"#276EF1", "color":"#FFFFFF", "label":null},
-        {"type":"highlight", "rect":{"x":20,"y":30,"w":280,"h":80}, "color":"#FFD84E", "opacity":0.4},
+        {"type":"highlight", "rect":{"x":20,"y":30,"w":280,"h":80}, "color":"#FFD84E", "opacity":0.4, "blend":"multiply"},
         {"type":"redact", "rect":{"x":-4,"y":7,"w":8,"h":9}, "fill":"#000000"}
     ]);
     assert_eq!(wire, json!({"schema_version":1,"marks":expected}));
@@ -86,6 +86,11 @@ fn invalid_marks_identify_their_index_and_field() {
             json!({"type":"highlight","rect":{"x":0,"y":0,"w":2,"h":1}, "opacity":1.1}),
             "opacity",
             "between 0 and 1",
+        ),
+        (
+            json!({"type":"highlight","rect":{"x":0,"y":0,"w":2,"h":1}, "blend":"screen"}),
+            "blend",
+            "unknown variant",
         ),
         (
             json!({"type":"ellipse","rect":{"x":0,"y":0,"w":2,"h":1}, "stroke":"red"}),

@@ -11,10 +11,12 @@ Set `schema_version` to `1` and supply a `marks` array. Marks are drawn in array
 | `arrow` | `from` at the tail, `to` at the tip | `stroke` `"#E63946"`, `width` `4` |
 | `text` | `at` at the upper-left of the text box | `text` `""`, `size` `22`, `color` `"#111111"`, `background` `null` |
 | `step` | `at` at the badge's center | `n` `null`, `size` `28`, `fill` `"#276EF1"`, `color` `"#FFFFFF"`, `label` `null` |
-| `highlight` | `rect` for the area | `color` `"#FFD84E"`, `opacity` `0.4` |
+| `highlight` | `rect` for the area | `color` `"#FFD84E"`, `opacity` `0.4`, `blend` `"multiply"` |
 | `redact` | `rect` for the area | `fill` `"#000000"` |
 
-`width` and `size` are positive integers in pixels. The rect `radius` is a nonnegative integer. Rect and ellipse strokes sit inside their outer bounds. Colors accept `#RGB`, `#RRGGBB`, and `#RRGGBBAA`. Highlight `opacity` ranges from 0 to 1 and multiplies the color's alpha. Redact replaces all four channels of the covered pixels with `fill`.
+`width` and `size` are positive integers in pixels. The rect `radius` is a nonnegative integer. Rect and ellipse strokes sit inside their outer bounds. Colors accept `#RGB`, `#RRGGBB`, and `#RRGGBBAA`. Redact replaces all four channels of the covered pixels with `fill`.
+
+Highlight `opacity` ranges from 0 to 1 and multiplies the color's alpha. The default `"multiply"` blend tints light areas and keeps dark text dark. Set `blend` to `"normal"` for a source-over color overlay.
 
 A step's `size` is its diameter. An omitted or `null` `n` starts at `1` or continues from one more than the highest preceding step number. Explicit numbers are positive integers. The badge shows its number, and its optional `label` is returned in the legend. Use a `text` mark for a visible label.
 

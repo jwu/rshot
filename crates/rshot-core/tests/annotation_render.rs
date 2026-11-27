@@ -86,20 +86,56 @@ fn rectangle_stroke_is_inside_the_declared_bounds() {
 }
 
 #[test]
-fn highlight_multiplies_opacity_by_the_color_alpha() {
+fn normal_highlight_multiplies_opacity_by_the_color_alpha() {
     let source = RgbaImage::from_fn(2, 2, |x, _| {
         Rgba([20, 40, 60, if x == 0 { 255 } else { 128 }])
     });
     let rendered = render_marks(
         &source,
         json!([
-            {"type":"highlight","rect":{"x":0,"y":0,"w":2,"h":1},"color":"#C88C5080","opacity":0.5}
+            {"type":"highlight","rect":{"x":0,"y":0,"w":2,"h":1},"color":"#C88C5080","opacity":0.5,"blend":"normal"}
         ]),
     );
     assert_eq!(rendered.image.get_pixel(0, 0), &Rgba([65, 65, 65, 255]));
     assert_eq!(rendered.image.get_pixel(1, 0), &Rgba([92, 80, 68, 160]));
     assert_eq!(rendered.image.get_pixel(1, 1), source.get_pixel(1, 1));
     assert_eq!(rendered.marks[0].bounds, Rect::new(0, 0, 2, 1));
+}
+
+#[test]
+fn multiply_highlight_tints_white_and_preserves_dark_pixels() {
+    let source = RgbaImage::from_fn(2, 2, |x, _| {
+        if x == 0 {
+            Rgba([255; 4])
+        } else {
+            Rgba([18, 18, 18, 255])
+        }
+    });
+    let rendered = render_marks(
+        &source,
+        json!([
+            {"type":"highlight","rect":{"x":0,"y":0,"w":2,"h":1},"opacity":1},
+            {"type":"highlight","rect":{"x":0,"y":1,"w":2,"h":1},"blend":"multiply"}
+        ]),
+    );
+    assert_eq!(rendered.image.get_pixel(0, 0), &Rgba([255, 216, 78, 255]));
+    assert_eq!(rendered.image.get_pixel(1, 0), &Rgba([18, 15, 6, 255]));
+    assert_eq!(rendered.image.get_pixel(0, 1), &Rgba([255, 239, 184, 255]));
+    assert_eq!(rendered.image.get_pixel(1, 1), &Rgba([18, 17, 13, 255]));
+}
+
+#[test]
+fn multiply_highlight_accounts_for_backdrop_and_color_alpha() {
+    let source = RgbaImage::from_fn(3, 1, |x, _| Rgba([20, 40, 60, [255, 128, 0][x as usize]]));
+    let rendered = render_marks(
+        &source,
+        json!([
+            {"type":"highlight","rect":{"x":0,"y":0,"w":3,"h":1},"color":"#C88C5080","opacity":0.5}
+        ]),
+    );
+    assert_eq!(rendered.image.get_pixel(0, 0), &Rgba([19, 35, 50, 255]));
+    assert_eq!(rendered.image.get_pixel(1, 0), &Rgba([55, 56, 56, 160]));
+    assert_eq!(rendered.image.get_pixel(2, 0), &Rgba([200, 140, 80, 64]));
 }
 
 #[test]
