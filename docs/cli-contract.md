@@ -1,6 +1,6 @@
 # CLI output contract
 
-`rshot-cli` runs on macOS 14 and later. Pass the global `--json` flag before or after a subcommand to receive one JSON object on stdout. By default, successful commands print one absolute artifact path per line, or a short message when they produce no artifacts. Diagnostics and warnings go to stderr.
+`rshot-cli` runs on macOS 14 and later. Pass the global `--json` flag before or after a subcommand to receive one JSON object on stdout. In text mode, commands that create artifacts print one absolute artifact path per line. Other commands may print a short message or use a command-specific format. `windows` and `elements` produce structured text, and `ocr` and `locate` use the TSV format documented in [OCR and text location](ocr.md). Diagnostics and warnings go to stderr.
 
 ## Success
 

@@ -1,5 +1,7 @@
 # PixPin 3.6.6.0 macOS 实现原理
 
+This document records historical implementation research. See the [README](../README.md) for current Rshot features.
+
 分析对象是本机 `/Applications/PixPin.app`，版本 3.6.6.0，构建 9090。主程序是同时包含 arm64 和 x86_64 的 Mach-O。本次检查 arm64，主程序文件 SHA-256 为 `d30e1cdd8aac83436e0bbb318a78859cf18bd03a62763a899555b2a42bd17698`。用 REA `inspect-macho` 查看模块、导入和导出，再用 `inspect-with-objdump` 追踪实际指令中的调用。Apple LLVM 的符号选项通过临时适配器传给 REA。本机 REA 没有可用的伪代码提供方，本报告依据静态符号、指令和常量，运行时选路及 Windows 实现仍需独立验证。
 
 ## 截图和多屏选区

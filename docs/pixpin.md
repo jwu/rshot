@@ -1,5 +1,7 @@
 # PixPin 3.6.6.0 功能清单与 Rshot 实现边界
 
+This document records historical research and planning. See the [README](../README.md) for current Rshot features.
+
 核对基准是官方 3.6.6.0 正式版日志、用户手册与本机 macOS 3.6.6.0 构建 9090。手册有持续更新，下文对明确标注测试版的行为保留其版本标签。Windows 行为根据官方文档记录。二进制检查确认应用身份和框架，以下交互以文档为依据，实机行为仍需按条验证。[正式版日志](https://pixpin.cn/changelog/3.6.6.0/) · [用户手册](https://pixpin.cn/docs)
 
 分析本机分发物中各模块的调用路径，见 [PixPin 实现原理](pixpin-implementation.md)。
