@@ -12,6 +12,10 @@ pub enum CaptureError {
     UnsupportedMacOs,
     #[error("请在「系统设置 → 隐私与安全性 → 屏幕与系统音频录制」中授权，再重新打开 Rshot")]
     PermissionDenied,
+    #[error("The screen is locked")]
+    ScreenLocked,
+    #[error("No active display is available")]
+    NoActiveDisplay,
     #[error("{0}")]
     DisplayEnumeration(String),
     #[error("找不到要截图的显示器")]
@@ -61,6 +65,30 @@ pub struct WindowInfo {
     pub bounds: Rect<f64>,
     pub layer: i32,
     pub is_on_screen: bool,
+}
+
+/// Returns the ID of the display with the greatest overlap in points with the window.
+/// Ties prefer the primary display, then the lowest ID.
+pub fn window_display_id(bounds: Rect<f64>, displays: &[DisplayInfo]) -> Option<u32> {
+    displays
+        .iter()
+        .filter_map(|display| {
+            let frame = display.bounds;
+            let left = bounds.origin.x.max(frame.origin.x);
+            let right =
+                (bounds.origin.x + bounds.size.width).min(frame.origin.x + frame.size.width);
+            let top = bounds.origin.y.max(frame.origin.y);
+            let bottom =
+                (bounds.origin.y + bounds.size.height).min(frame.origin.y + frame.size.height);
+            (right > left && bottom > top).then_some(((right - left) * (bottom - top), display))
+        })
+        .max_by(|(area_a, a), (area_b, b)| {
+            area_a
+                .total_cmp(area_b)
+                .then(a.is_primary.cmp(&b.is_primary))
+                .then(b.id.cmp(&a.id))
+        })
+        .map(|(_, display)| display.id)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

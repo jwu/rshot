@@ -4,10 +4,12 @@ use objc2::{
     AnyThread,
     rc::{Retained, autoreleasepool},
 };
-use objc2_core_foundation::{CFRetained, CGPoint, CGRect, CGSize};
+use objc2_core_foundation::{
+    CFBoolean, CFDictionary, CFRetained, CFString, CFType, CGPoint, CGRect, CGSize,
+};
 use objc2_core_graphics::{
     CGColorSpace, CGContext, CGImage, CGImageAlphaInfo, CGPreflightScreenCaptureAccess,
-    CGRequestScreenCaptureAccess, kCGColorSpaceSRGB,
+    CGRequestScreenCaptureAccess, CGSessionCopyCurrentDictionary, kCGColorSpaceSRGB,
 };
 use objc2_foundation::{NSArray, NSError, NSProcessInfo};
 use objc2_screen_capture_kit::{
@@ -20,7 +22,7 @@ use super::{bitmap::CGBitmapContextCreate, displays, windows};
 use crate::{
     capture::{
         CaptureBackend, CaptureError, CaptureMetadata, CaptureSource, CaptureTargets,
-        CapturedImage, DisplayInfo, WindowInfo, crop,
+        CapturedImage, DisplayInfo, WindowInfo, crop, window_display_id,
     },
     geometry::{Rect, Size},
 };
@@ -28,6 +30,34 @@ use crate::{
 pub struct MacOsCapture;
 
 impl MacOsCapture {
+    /// Checks the calling process's screen recording permission without requesting it.
+    pub fn has_screen_recording_permission(&self) -> bool {
+        CGPreflightScreenCaptureAccess()
+    }
+
+    /// Reports whether the current session is marked as locked by WindowServer.
+    pub fn is_screen_locked(&self) -> bool {
+        let Some(session) = CGSessionCopyCurrentDictionary() else {
+            return false;
+        };
+        // CoreGraphics returns a dictionary with CFString keys and Core Foundation values.
+        let session =
+            unsafe { CFRetained::cast_unchecked::<CFDictionary<CFString, CFType>>(session) };
+        // WindowServer omits this undocumented key in sessions without a reported lock state.
+        session
+            .get(&CFString::from_static_str("CGSSessionScreenIsLocked"))
+            .is_some_and(|value| {
+                value
+                    .downcast_ref::<CFBoolean>()
+                    .is_some_and(CFBoolean::value)
+            })
+    }
+
+    /// Checks the capture environment without requesting permission or starting a screenshot.
+    pub fn check_capture_available(&self) -> Result<(), CaptureError> {
+        self.capture_displays().map(|_| ())
+    }
+
     /// Lists active displays without requesting screen recording permission.
     pub fn displays(&self) -> Result<Vec<DisplayInfo>, CaptureError> {
         displays::displays()
@@ -63,8 +93,7 @@ impl MacOsCapture {
 
     /// Captures the entire window in isolation, including portions outside the display.
     pub fn capture_window(&self, window_id: u32) -> Result<CapturedImage, CaptureError> {
-        check_permission()?;
-        let displays = self.displays()?;
+        let displays = self.capture_displays()?;
         let (image, (bounds, scale_factor, display_id)) = capture_image(move |content| {
             let (filter, bounds, scale_factor) = window_filter(content, window_id)?;
             let width: u32 = ((bounds.size.width * scale_factor).round() as u64).try_into()?;
@@ -84,7 +113,7 @@ impl MacOsCapture {
             Ok((
                 filter,
                 config,
-                (bounds, scale_factor, window_display(bounds, &displays)),
+                (bounds, scale_factor, window_display_id(bounds, &displays)),
             ))
         })?;
         let (width, height) = image.dimensions();
@@ -105,8 +134,7 @@ impl MacOsCapture {
         display_id: Option<u32>,
         region: Option<Rect<f64>>,
     ) -> Result<CapturedImage, CaptureError> {
-        check_permission()?;
-        let display = select_display(self.displays()?, display_id)?;
+        let display = select_display(self.capture_displays()?, display_id)?;
         let selection = region
             .map(|region| display_region(&display, region))
             .transpose()?;
@@ -142,12 +170,27 @@ impl MacOsCapture {
             },
         })
     }
+
+    fn capture_displays(&self) -> Result<Vec<DisplayInfo>, CaptureError> {
+        check_platform()?;
+        if self.is_screen_locked() {
+            return Err(CaptureError::ScreenLocked);
+        }
+        if !self.has_screen_recording_permission() {
+            return Err(CaptureError::PermissionDenied);
+        }
+        let displays = self.displays()?;
+        if displays.is_empty() {
+            return Err(CaptureError::NoActiveDisplay);
+        }
+        Ok(displays)
+    }
 }
 
 impl CaptureBackend for MacOsCapture {
     fn ready(&self) -> Result<(), CaptureError> {
         check_platform()?;
-        if !CGPreflightScreenCaptureAccess() && !CGRequestScreenCaptureAccess() {
+        if !self.has_screen_recording_permission() && !CGRequestScreenCaptureAccess() {
             return Err(CaptureError::PermissionDenied);
         }
         Ok(())
@@ -190,14 +233,6 @@ fn check_platform() -> Result<(), CaptureError> {
         < 14
     {
         return Err(CaptureError::UnsupportedMacOs);
-    }
-    Ok(())
-}
-
-fn check_permission() -> Result<(), CaptureError> {
-    check_platform()?;
-    if !CGPreflightScreenCaptureAccess() {
-        return Err(CaptureError::PermissionDenied);
     }
     Ok(())
 }
@@ -320,28 +355,6 @@ fn window_filter(
         let scale = f64::from(filter.pointPixelScale());
         Ok((filter, bounds, scale))
     }
-}
-
-fn window_display(bounds: Rect<f64>, displays: &[DisplayInfo]) -> Option<u32> {
-    displays
-        .iter()
-        .filter_map(|display| {
-            let frame = display.bounds;
-            let left = bounds.origin.x.max(frame.origin.x);
-            let right =
-                (bounds.origin.x + bounds.size.width).min(frame.origin.x + frame.size.width);
-            let top = bounds.origin.y.max(frame.origin.y);
-            let bottom =
-                (bounds.origin.y + bounds.size.height).min(frame.origin.y + frame.size.height);
-            (right > left && bottom > top).then_some(((right - left) * (bottom - top), display))
-        })
-        .max_by(|(area_a, a), (area_b, b)| {
-            area_a
-                .total_cmp(area_b)
-                .then(a.is_primary.cmp(&b.is_primary))
-                .then(b.id.cmp(&a.id))
-        })
-        .map(|(_, display)| display.id)
 }
 
 fn stream_config(width: usize, height: usize) -> Retained<SCStreamConfiguration> {
@@ -568,15 +581,15 @@ mod tests {
         let standard = display(2, Rect::new(-1600., -200., 1600., 1000.), 1, false);
         let displays = [standard, retina];
         assert_eq!(
-            window_display(Rect::new(-300., 20., 400., 600.), &displays),
+            window_display_id(Rect::new(-300., 20., 400., 600.), &displays),
             Some(2)
         );
         assert_eq!(
-            window_display(Rect::new(-200., 20., 400., 600.), &displays),
+            window_display_id(Rect::new(-200., 20., 400., 600.), &displays),
             Some(1)
         );
         assert_eq!(
-            window_display(Rect::new(1440., 20., 300., 400.), &displays),
+            window_display_id(Rect::new(1440., 20., 300., 400.), &displays),
             None
         );
     }

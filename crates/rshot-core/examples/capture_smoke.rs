@@ -46,26 +46,20 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
     }
 
-    if !matches!(&display, Err(CaptureError::PermissionDenied)) {
-        assert!(matches!(
-            capture.capture_display(Some(u32::MAX)),
-            Err(CaptureError::DisplayNotFound)
-        ));
-        assert!(matches!(
-            capture.capture_window(u32::MAX),
-            Err(CaptureError::WindowNotFound(u32::MAX))
-        ));
-        println!("Verified missing display and missing window errors");
-        if primary.is_some() {
-            assert!(matches!(
-                capture.capture_region(None, Rect::new(0., 0., 0., 1.)),
-                Err(CaptureError::RegionOutOfBounds)
-            ));
-            println!("Verified empty region error");
-        }
-    }
-
     let display = display?;
+    assert!(matches!(
+        capture.capture_display(Some(u32::MAX)),
+        Err(CaptureError::DisplayNotFound)
+    ));
+    assert!(matches!(
+        capture.capture_window(u32::MAX),
+        Err(CaptureError::WindowNotFound(u32::MAX))
+    ));
+    assert!(matches!(
+        capture.capture_region(None, Rect::new(0., 0., 0., 1.)),
+        Err(CaptureError::RegionOutOfBounds)
+    ));
+    println!("Verified missing display, empty region and missing window errors");
     let region = region?;
     let window = window.ok_or("No on-screen standard window")??;
     let primary = primary.ok_or("No primary display")?;
