@@ -1,7 +1,7 @@
 use image::{GenericImageView, Rgba, RgbaImage, imageops};
 #[cfg(target_os = "macos")]
 use rshot_core::annotation::LegendEntry;
-use rshot_core::annotation::{Rendered, Spec, render};
+use rshot_core::annotation::{Rendered, Spec, render, render_owned};
 use rshot_core::geometry::Rect;
 use serde_json::{Value, json};
 
@@ -56,6 +56,29 @@ fn redact_replaces_all_channels_and_composes_in_array_order() {
     assert_eq!(rendered.marks[1].bounds, Rect::new(2, 1, 5, 5));
     assert!(rendered.warnings.is_empty());
     assert_eq!(source.get_pixel(2, 1), &Rgba([2, 1, 170, 255]));
+}
+
+#[test]
+fn owned_render_samples_original_pixels_for_overlapping_and_clipped_insets() {
+    let source = RgbaImage::from_fn(26, 19, |x, y| Rgba([x as u8, y as u8, 11, 223]));
+    let allocation = source.as_raw().as_ptr();
+    let spec = Spec::from_json(
+        r##"{"schema_version":1,"marks":[
+            {"type":"redact","rect":{"x":0,"y":0,"w":15,"h":15},"fill":"#11223344"},
+            {"type":"magnify","source":{"x":-2,"y":0,"w":13,"h":7},"at":{"x":7,"y":5},"scale":1.3},
+            {"type":"magnify","source":{"x":8,"y":3,"w":11,"h":12},"at":{"x":-9,"y":12},"scale":1.7},
+            {"type":"magnify","source":{"x":0,"y":0,"w":5,"h":4},"at":{"x":35,"y":32}},
+            {"type":"magnify","source":{"x":36,"y":0,"w":5,"h":4},"at":{"x":1,"y":1}}
+        ]}"##,
+    )
+    .unwrap();
+    let expected = render(&source, &spec).unwrap();
+    let actual = render_owned(source, &spec).unwrap();
+    assert_eq!(actual.image.as_raw().as_ptr(), allocation);
+    assert_eq!(actual.image, expected.image);
+    assert_eq!(actual.marks, expected.marks);
+    assert_eq!(actual.warnings, expected.warnings);
+    assert_eq!(actual.legend, expected.legend);
 }
 
 #[test]

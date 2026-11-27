@@ -6,7 +6,7 @@ use std::{
 };
 
 use rshot_core::{
-    annotation::{Spec, render},
+    annotation::{Spec, render_owned},
     png,
 };
 use serde_json::{Map, json};
@@ -32,7 +32,8 @@ pub struct Args {
 pub fn run(args: Args) -> Result<CommandOutput, CliError> {
     let input = open_image(&args.input)?;
     let spec = read_spec(args.spec)?;
-    let rendered = render(&input, &spec).map_err(|error| {
+    let (width, height) = input.dimensions();
+    let rendered = render_owned(input, &spec).map_err(|error| {
         CliError::new(
             ExitStatus::Render,
             "annotation_render_failed",
@@ -58,7 +59,7 @@ pub fn run(args: Args) -> Result<CommandOutput, CliError> {
         ("image".into(), json!(artifact)),
         (
             "source".into(),
-            json!({"path": source, "width": input.width(), "height": input.height()}),
+            json!({"path": source, "width": width, "height": height}),
         ),
         ("legend".into(), json!(rendered.legend)),
         ("marks".into(), json!(rendered.marks)),

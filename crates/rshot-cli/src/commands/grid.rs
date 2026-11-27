@@ -2,7 +2,7 @@ use std::path::{self, Path, PathBuf};
 
 use image::{ImageReader, RgbaImage};
 use rshot_core::{
-    locate::{GridOptions, LocateWarning, Rendered, grid},
+    locate::{GridOptions, LocateWarning, Rendered, grid_owned},
     png,
 };
 use serde_json::{Map, Value, json};
@@ -29,8 +29,9 @@ pub struct Args {
 
 pub fn run(args: Args) -> Result<CommandOutput, CliError> {
     let input = open_image(&args.input)?;
-    let rendered = grid(
-        &input,
+    let dimensions = input.dimensions();
+    let rendered = grid_owned(
+        input,
         GridOptions {
             step: args.step,
             label_every: args.label_every,
@@ -43,14 +44,7 @@ pub fn run(args: Args) -> Result<CommandOutput, CliError> {
         ("columns".into(), json!(metadata.columns)),
         ("rows".into(), json!(metadata.rows)),
     ]);
-    save_rendered(
-        &args.input,
-        input.dimensions(),
-        args.out,
-        "grid",
-        rendered,
-        fields,
-    )
+    save_rendered(&args.input, dimensions, args.out, "grid", rendered, fields)
 }
 
 pub(super) fn open_image(path: &Path) -> Result<RgbaImage, CliError> {

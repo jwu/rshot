@@ -113,22 +113,26 @@ pub enum LocateError {
     OutputTooLarge,
 }
 
-pub fn grid(image: &RgbaImage, mut options: GridOptions) -> Rendered<GridMetadata> {
+pub fn grid(image: &RgbaImage, options: GridOptions) -> Rendered<GridMetadata> {
+    grid_owned(image.clone(), options)
+}
+
+pub fn grid_owned(mut image: RgbaImage, mut options: GridOptions) -> Rendered<GridMetadata> {
     options.step = options.step.max(10);
     let region = Rect::new(0, 0, image.width(), image.height());
-    let mut output = image.clone();
     let mut warnings = Vec::new();
-    if !draw_grid(&mut output, region, 1., options, false) {
+    if !draw_grid(&mut image, region, 1., options, false) {
         warnings.push(LocateWarning::LabelsUnavailable);
     }
+    let metadata = GridMetadata {
+        step: options.step,
+        columns: image.width().div_ceil(options.step),
+        rows: image.height().div_ceil(options.step),
+        source_size: region.size,
+    };
     Rendered {
-        image: output,
-        metadata: GridMetadata {
-            step: options.step,
-            columns: image.width().div_ceil(options.step),
-            rows: image.height().div_ceil(options.step),
-            source_size: region.size,
-        },
+        image,
+        metadata,
         warnings,
     }
 }
@@ -381,6 +385,22 @@ mod tests {
             }
             assert_eq!(*pixel, expected, "pixel at ({x}, {y})");
         }
+    }
+
+    #[test]
+    fn owned_grid_reuses_the_input_allocation() {
+        let input = source(31, 20);
+        let allocation = input.as_raw().as_ptr();
+        let options = GridOptions {
+            label_every: 0,
+            ..GridOptions::default()
+        };
+        let expected = grid(&input, options);
+        let actual = grid_owned(input, options);
+        assert_eq!(actual.image.as_raw().as_ptr(), allocation);
+        assert_eq!(actual.image, expected.image);
+        assert_eq!(actual.metadata, expected.metadata);
+        assert_eq!(actual.warnings, expected.warnings);
     }
 
     #[test]

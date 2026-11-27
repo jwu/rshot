@@ -7,7 +7,7 @@ use crate::geometry::Point;
 mod render;
 pub mod spec;
 
-pub use render::{LegendEntry, RenderWarning, Rendered, RenderedMark, render};
+pub use render::{LegendEntry, RenderWarning, Rendered, RenderedMark, render, render_owned};
 pub use spec::{AnnotateError, Spec};
 
 #[cfg(target_os = "macos")]

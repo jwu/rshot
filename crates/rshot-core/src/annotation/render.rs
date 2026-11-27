@@ -47,8 +47,61 @@ pub struct RenderedMark {
 
 pub fn render(image: &RgbaImage, spec: &Spec) -> Result<Rendered, AnnotateError> {
     spec.validate()?;
+    render_with_source(image.clone(), spec, |_| Some((Point::new(0, 0), image)))
+}
+
+pub fn render_owned(image: RgbaImage, spec: &Spec) -> Result<Rendered, AnnotateError> {
+    spec.validate()?;
+    let sources: Vec<_> = spec
+        .marks
+        .iter()
+        .map(|mark| {
+            let MarkSpec::Magnify(mark) = mark else {
+                return None;
+            };
+            let sample = widen(mark.source).clip(image.dimensions());
+            let area = magnify_area(sample, mark);
+            let visible = area.clip(image.dimensions());
+            if visible.size.width == 0 || visible.size.height == 0 {
+                return None;
+            }
+            let mapping = CoordinateMapping {
+                offset: sample.origin,
+                scale: mark.scale,
+            };
+            let x = (i64::from(visible.origin.x) - area.origin.x) as u32;
+            let y = (i64::from(visible.origin.y) - area.origin.y) as u32;
+            let first = mapping.source_pixel(Point::new(x, y));
+            let last = mapping.source_pixel(Point::new(
+                x + (visible.size.width - 1),
+                y + (visible.size.height - 1),
+            ));
+            let pixels = imageops::crop_imm(
+                &image,
+                first.x,
+                first.y,
+                last.x - first.x + 1,
+                last.y - first.y + 1,
+            )
+            .to_image();
+            Some((first, pixels))
+        })
+        .collect();
+    render_with_source(image, spec, |index| {
+        sources[index]
+            .as_ref()
+            .map(|(origin, pixels)| (*origin, pixels))
+    })
+}
+
+fn render_with_source<'a>(
+    image: RgbaImage,
+    spec: &Spec,
+    source: impl Fn(usize) -> Option<(Point<u32>, &'a RgbaImage)>,
+) -> Result<Rendered, AnnotateError> {
+    let dimensions = image.dimensions();
     let mut rendered = Rendered {
-        image: image.clone(),
+        image,
         warnings: Vec::new(),
         legend: Vec::new(),
         marks: Vec::with_capacity(spec.marks.len()),
@@ -104,7 +157,7 @@ pub fn render(image: &RgbaImage, spec: &Spec) -> Result<Rendered, AnnotateError>
                 let area = Rect::new(x - size / 2, y - size / 2, size, size);
                 let circle = Shape::Ellipse.path(area, 0);
                 canvas.mask(area, circle.as_ref(), FillRule::Winding, mark.fill, "size")?;
-                let visible = area.clip(image.dimensions()).size;
+                let visible = area.clip(dimensions).size;
                 if mark.color.0[3] != 0 && visible.width != 0 && visible.height != 0 {
                     canvas.text(
                         &value,
@@ -155,12 +208,12 @@ pub fn render(image: &RgbaImage, spec: &Spec) -> Result<Rendered, AnnotateError>
                 mark.rects
                     .iter()
                     .map(|&rect| widen(rect))
-                    .find(|&area| outside(area, image.dimensions()))
+                    .find(|&area| outside(area, dimensions))
                     .map(|area| (area, "rects"))
             }
             MarkSpec::Magnify(mark) => {
                 canvas.warn_if_clipped(widen(mark.source), "source");
-                Some((canvas.magnify(image, mark), "at"))
+                Some((canvas.magnify(source(index), mark), "at"))
             }
         };
         if let Some((area, field)) = clip_check {
@@ -182,6 +235,15 @@ fn widen(rect: Rect<i32>) -> Rect<i64> {
         i64::from(rect.origin.y),
         i64::from(rect.size.width),
         i64::from(rect.size.height),
+    )
+}
+
+fn magnify_area(sample: Rect<u32>, mark: &MagnifySpec) -> Rect<i64> {
+    Rect::new(
+        i64::from(mark.at.x),
+        i64::from(mark.at.y),
+        (f64::from(sample.size.width) * mark.scale).round() as i64,
+        (f64::from(sample.size.height) * mark.scale).round() as i64,
     )
 }
 
@@ -424,18 +486,17 @@ impl Canvas<'_> {
         }
     }
 
-    fn magnify(&mut self, source: &RgbaImage, mark: &MagnifySpec) -> Rect<i64> {
-        let sample = widen(mark.source).clip(source.dimensions());
+    fn magnify(
+        &mut self,
+        source: Option<(Point<u32>, &RgbaImage)>,
+        mark: &MagnifySpec,
+    ) -> Rect<i64> {
+        let sample = widen(mark.source).clip(self.image.dimensions());
         let (width, height) = (sample.size.width, sample.size.height);
         if width == 0 || height == 0 {
             return Rect::new(0, 0, 0, 0);
         }
-        let area = Rect::new(
-            i64::from(mark.at.x),
-            i64::from(mark.at.y),
-            (f64::from(width) * mark.scale).round() as i64,
-            (f64::from(height) * mark.scale).round() as i64,
-        );
+        let area = magnify_area(sample, mark);
         if mark.connector {
             let source_area = Rect::new(
                 i64::from(sample.origin.x),
@@ -450,6 +511,9 @@ impl Canvas<'_> {
             );
             self.warn_if_clipped(connector, "connector");
         }
+        let Some((source_origin, source)) = source else {
+            return area;
+        };
         let mapping = CoordinateMapping {
             offset: sample.origin,
             scale: mark.scale,
@@ -462,7 +526,8 @@ impl Canvas<'_> {
                 let dx = i64::from(col) - area.origin.x;
                 let dy = i64::from(row) - area.origin.y;
                 let from = mapping.source_pixel(Point::new(dx as u32, dy as u32));
-                self.blend(col, row, *source.get_pixel(from.x, from.y));
+                let pixel = source.get_pixel(from.x - source_origin.x, from.y - source_origin.y);
+                self.blend(col, row, *pixel);
                 if dx < border
                     || dy < border
                     || dx >= area.size.width - border
