@@ -30,6 +30,13 @@ pub(super) fn exists(window_id: u32) -> bool {
         .is_some_and(|windows| !windows.is_empty())
 }
 
+pub(super) fn find(window_id: u32) -> Option<WindowInfo> {
+    window_list(CGWindowListOption::OptionIncludingWindow, window_id)?
+        .iter()
+        .filter_map(|window| window_info(&window))
+        .find(|window| window.window_id == window_id)
+}
+
 pub(super) fn windows(include_all: bool) -> Vec<WindowInfo> {
     let mut windows: Vec<_> = window_list(CGWindowListOption::OptionOnScreenOnly, 0)
         .iter()

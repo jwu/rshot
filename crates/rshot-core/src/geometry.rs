@@ -57,6 +57,16 @@ impl<T> From<Rect<T>> for RectFields<T> {
     }
 }
 
+impl Rect<f64> {
+    pub fn intersection(self, other: Self) -> Option<Self> {
+        let x = self.origin.x.max(other.origin.x);
+        let y = self.origin.y.max(other.origin.y);
+        let right = (self.origin.x + self.size.width).min(other.origin.x + other.size.width);
+        let bottom = (self.origin.y + self.size.height).min(other.origin.y + other.size.height);
+        (right > x && bottom > y).then(|| Self::new(x, y, right - x, bottom - y))
+    }
+}
+
 impl Rect<i64> {
     pub(crate) fn clip(self, (width, height): (u32, u32)) -> Rect<u32> {
         let Point { x, y } = self.origin;

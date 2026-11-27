@@ -91,18 +91,25 @@ impl MacOsCapture {
         self.capture_display_area(display_id, Some(region))
     }
 
+    /// Returns the geometry and pixel scale of a single-window screenshot without taking it.
+    pub fn window_capture_metadata(&self, window_id: u32) -> Result<CaptureMetadata, CaptureError> {
+        let displays = self.capture_displays()?;
+        let (send, receive) = mpsc::channel();
+        request_shareable_content(move |content| {
+            let result = content
+                .and_then(|content| window_capture_plan(content, window_id, &displays))
+                .map(|(_, metadata)| metadata);
+            let _ = send.send(result);
+        });
+        receive_capture(receive)
+    }
+
     /// Captures the entire window in isolation, including portions outside the display.
     pub fn capture_window(&self, window_id: u32) -> Result<CapturedImage, CaptureError> {
         let displays = self.capture_displays()?;
-        let (image, (bounds, scale_factor, display_id)) = capture_image(move |content| {
-            let (filter, bounds, scale_factor) = window_filter(content, window_id)?;
-            let width: u32 = ((bounds.size.width * scale_factor).round() as u64).try_into()?;
-            let height: u32 = ((bounds.size.height * scale_factor).round() as u64).try_into()?;
-            if width == 0 || height == 0 {
-                return Err(CaptureError::Screenshot(format!(
-                    "Window {window_id} has no capturable pixels"
-                )));
-            }
+        let (image, mut metadata) = capture_image(move |content| {
+            let (filter, metadata) = window_capture_plan(content, window_id, &displays)?;
+            let Size { width, height } = metadata.pixel_size;
             let config = stream_config(width as usize, height as usize);
             // These macOS 14 properties apply to desktop-independent window filters.
             unsafe {
@@ -110,23 +117,11 @@ impl MacOsCapture {
                 config.setIgnoreGlobalClipSingleWindow(true);
                 config.setShouldBeOpaque(true);
             }
-            Ok((
-                filter,
-                config,
-                (bounds, scale_factor, window_display_id(bounds, &displays)),
-            ))
+            Ok((filter, config, metadata))
         })?;
         let (width, height) = image.dimensions();
-        Ok(CapturedImage {
-            image,
-            metadata: CaptureMetadata {
-                source: CaptureSource::Window { window_id },
-                display_id,
-                scale_factor,
-                bounds,
-                pixel_size: Size { width, height },
-            },
-        })
+        metadata.pixel_size = Size { width, height };
+        Ok(CapturedImage { image, metadata })
     }
 
     fn capture_display_area(
@@ -330,12 +325,13 @@ fn display_filter(
     }
 }
 
-fn window_filter(
+fn window_capture_plan(
     content: &SCShareableContent,
     window_id: u32,
-) -> Result<(Retained<SCContentFilter>, Rect<f64>, f64), CaptureError> {
+    displays: &[DisplayInfo],
+) -> Result<(Retained<SCContentFilter>, CaptureMetadata), CaptureError> {
     // The window comes from the current shareable content snapshot.
-    unsafe {
+    let (filter, bounds, scale_factor) = unsafe {
         let window = content
             .windows()
             .iter()
@@ -352,9 +348,24 @@ fn window_filter(
         let filter =
             SCContentFilter::initWithDesktopIndependentWindow(SCContentFilter::alloc(), &window);
         let bounds = logical_rect(window.frame());
-        let scale = f64::from(filter.pointPixelScale());
-        Ok((filter, bounds, scale))
+        let scale_factor = f64::from(filter.pointPixelScale());
+        (filter, bounds, scale_factor)
+    };
+    let width: u32 = ((bounds.size.width * scale_factor).round() as u64).try_into()?;
+    let height: u32 = ((bounds.size.height * scale_factor).round() as u64).try_into()?;
+    if width == 0 || height == 0 {
+        return Err(CaptureError::Screenshot(format!(
+            "Window {window_id} has no capturable pixels"
+        )));
     }
+    let metadata = CaptureMetadata {
+        source: CaptureSource::Window { window_id },
+        display_id: window_display_id(bounds, displays),
+        scale_factor,
+        bounds,
+        pixel_size: Size { width, height },
+    };
+    Ok((filter, metadata))
 }
 
 fn stream_config(width: usize, height: usize) -> Retained<SCStreamConfiguration> {
@@ -381,52 +392,59 @@ fn capture_image<T: Copy + Send + Sync + 'static>(
     + 'static,
 ) -> Result<(RgbaImage, T), CaptureError> {
     let (send, receive) = mpsc::channel();
+    request_shareable_content(move |content| {
+        let (filter, config, metadata) = match content.and_then(&prepare) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                let _ = send.send(Err(error));
+                return;
+            }
+        };
+        let send = send.clone();
+        let completion = RcBlock::new(move |image: *mut CGImage, error: *mut NSError| {
+            // The CGImage and error stay alive until this callback returns.
+            let (image, error) = unsafe { (image.as_ref(), error.as_ref()) };
+            let result = image
+                .ok_or_else(|| native_error(error, "截取屏幕失败", CaptureError::Screenshot))
+                .and_then(to_rgba)
+                .map(|frame| (frame, metadata));
+            let _ = send.send(result);
+        });
+        // ScreenCaptureKit copies the block and retains the filter and configuration as needed.
+        unsafe {
+            SCScreenshotManager::captureImageWithFilter_configuration_completionHandler(
+                &filter,
+                &config,
+                Some(&completion),
+            );
+        }
+    });
+    receive_capture(receive)
+}
+
+fn request_shareable_content(
+    reply: impl Fn(Result<&SCShareableContent, CaptureError>) + Send + Sync + 'static,
+) {
     autoreleasepool(|_| {
         let completion = RcBlock::new(
             move |content: *mut SCShareableContent, error: *mut NSError| {
                 // The framework keeps both arguments alive for the duration of the callback.
                 let (content, error) = unsafe { (content.as_ref(), error.as_ref()) };
-                let prepared = content
-                    .ok_or_else(|| {
-                        native_error(
-                            error,
-                            "无法列出可录制的显示器",
-                            CaptureError::DisplayEnumeration,
-                        )
-                    })
-                    .and_then(&prepare);
-                let (filter, config, metadata) = match prepared {
-                    Ok(prepared) => prepared,
-                    Err(error) => {
-                        let _ = send.send(Err(error));
-                        return;
-                    }
-                };
-                let send = send.clone();
-                let completion = RcBlock::new(move |image: *mut CGImage, error: *mut NSError| {
-                    // The CGImage and error stay alive until this callback returns.
-                    let (image, error) = unsafe { (image.as_ref(), error.as_ref()) };
-                    let result = image
-                        .ok_or_else(|| {
-                            native_error(error, "截取屏幕失败", CaptureError::Screenshot)
-                        })
-                        .and_then(to_rgba)
-                        .map(|frame| (frame, metadata));
-                    let _ = send.send(result);
-                });
-                // ScreenCaptureKit copies the block and retains the filter and configuration as needed.
-                unsafe {
-                    SCScreenshotManager::captureImageWithFilter_configuration_completionHandler(
-                        &filter,
-                        &config,
-                        Some(&completion),
-                    );
-                }
+                reply(content.ok_or_else(|| {
+                    native_error(
+                        error,
+                        "无法列出可录制的显示器",
+                        CaptureError::DisplayEnumeration,
+                    )
+                }));
             },
         );
         // The copied block runs on a ScreenCaptureKit queue, including in processes without a run loop.
         unsafe { SCShareableContent::getShareableContentWithCompletionHandler(&completion) };
     });
+}
+
+fn receive_capture<T>(receive: mpsc::Receiver<Result<T, CaptureError>>) -> Result<T, CaptureError> {
     receive
         .recv_timeout(Duration::from_secs(15))
         .map_err(CaptureError::Timeout)?

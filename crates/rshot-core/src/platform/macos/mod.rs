@@ -1,3 +1,4 @@
+pub(crate) mod ax;
 mod bitmap;
 pub(crate) mod capture;
 mod displays;
