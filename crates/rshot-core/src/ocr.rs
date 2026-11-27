@@ -1,4 +1,4 @@
-use std::{num::NonZeroUsize, ops::Range};
+use std::{borrow::Cow, num::NonZeroUsize, ops::Range};
 
 use caseless::{Caseless, default_case_fold_str};
 use image::RgbaImage;
@@ -108,6 +108,20 @@ pub enum OcrError {
 
 pub fn recognize(
     image: &RgbaImage,
+    options: &OcrOptions,
+) -> Result<Vec<TextObservation>, OcrError> {
+    recognize_with_image(Cow::Borrowed(image), options)
+}
+
+pub fn recognize_owned(
+    image: RgbaImage,
+    options: &OcrOptions,
+) -> Result<Vec<TextObservation>, OcrError> {
+    recognize_with_image(Cow::Owned(image), options)
+}
+
+fn recognize_with_image(
+    image: Cow<'_, RgbaImage>,
     options: &OcrOptions,
 ) -> Result<Vec<TextObservation>, OcrError> {
     #[cfg(target_os = "macos")]

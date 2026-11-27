@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use clap::builder::NonEmptyStringValueParser;
 use rshot_core::{
     geometry::Rect,
-    ocr::{OcrOptions, RecognitionLevel, TextObservation, recognize},
+    ocr::{OcrOptions, RecognitionLevel, TextObservation, recognize_owned},
 };
 use serde_json::{Map, json};
 
@@ -50,7 +50,7 @@ pub(super) fn read_text(
     options: &OcrOptions,
 ) -> Result<Vec<TextObservation>, CliError> {
     let image = open_image(path)?;
-    Ok(recognize(&image, options)?)
+    Ok(recognize_owned(image, options)?)
 }
 
 pub(super) fn text_row(rect: Rect<u32>, confidence: f32, text: &str) -> String {

@@ -1,4 +1,9 @@
-use std::{ops::Range, ptr};
+use std::{
+    borrow::Cow,
+    ffi::c_void,
+    ops::Range,
+    ptr::{self, NonNull},
+};
 
 use image::RgbaImage;
 use objc2::{
@@ -69,7 +74,7 @@ impl RangeSource {
 }
 
 pub(crate) fn recognize(
-    image: &RgbaImage,
+    image: Cow<'_, RgbaImage>,
     options: &OcrOptions,
 ) -> Result<Vec<TextObservation>, OcrError> {
     autoreleasepool(|_| {
@@ -156,20 +161,26 @@ fn set_languages(request: &VNRecognizeTextRequest, options: &OcrOptions) -> Resu
     Ok(())
 }
 
-fn cg_image(image: &RgbaImage) -> Result<CFRetained<CGImage>, OcrError> {
+fn cg_image(image: Cow<'_, RgbaImage>) -> Result<CFRetained<CGImage>, OcrError> {
     // kCGColorSpaceSRGB is a Core Graphics color space name.
     let colors = CGColorSpace::with_name(Some(unsafe { kCGColorSpaceSRGB }))
         .ok_or(OcrError::ImagePreparation)?;
-    let bytes = CFData::from_bytes(image.as_raw());
-    let provider = CGDataProvider::with_cf_data(Some(&bytes)).ok_or(OcrError::ImagePreparation)?;
+    let (width, height) = image.dimensions();
+    let provider = match image {
+        Cow::Borrowed(image) => {
+            CGDataProvider::with_cf_data(Some(&CFData::from_bytes(image.as_raw())))
+        }
+        Cow::Owned(image) => owned_provider(image.into_raw()),
+    }
+    .ok_or(OcrError::ImagePreparation)?;
     // The data provider retains the RGBA bytes and the null decode table selects defaults.
     unsafe {
         CGImage::new(
-            image.width() as usize,
-            image.height() as usize,
+            width as usize,
+            height as usize,
             8,
             32,
-            image.width() as usize * 4,
+            width as usize * 4,
             Some(&colors),
             CGBitmapInfo(CGImageAlphaInfo::Last.0 | CGImageByteOrderInfo::Order32Big.0),
             Some(&provider),
@@ -179,6 +190,24 @@ fn cg_image(image: &RgbaImage) -> Result<CFRetained<CGImage>, OcrError> {
         )
     }
     .ok_or(OcrError::ImagePreparation)
+}
+
+fn owned_provider(bytes: Vec<u8>) -> Option<CFRetained<CGDataProvider>> {
+    unsafe extern "C-unwind" fn release(info: *mut c_void, _: NonNull<c_void>, _: usize) {
+        // Core Graphics calls this once when the last reference to the provider is released.
+        drop(unsafe { Box::from_raw(info.cast::<Vec<u8>>()) });
+    }
+
+    let (data, len) = (bytes.as_ptr(), bytes.len());
+    let owner = Box::into_raw(Box::new(bytes));
+    // The boxed Vec keeps the data immutable and allocated for every retained provider reference.
+    let provider =
+        unsafe { CGDataProvider::with_data(owner.cast(), data.cast(), len, Some(release)) };
+    if provider.is_none() {
+        // A failed creation leaves ownership with the caller.
+        drop(unsafe { Box::from_raw(owner) });
+    }
+    provider
 }
 
 fn pixel_rect(bounds: CGRect, dimensions: (u32, u32)) -> Rect<u32> {
@@ -195,4 +224,22 @@ fn pixel_rect(bounds: CGRect, dimensions: (u32, u32)) -> Rect<u32> {
 
 fn vision_error(error: Retained<NSError>) -> OcrError {
     OcrError::Vision(error.localizedDescription().to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn owned_cg_image_keeps_rgba_bytes_alive_through_provider_retain() {
+        let expected = vec![255, 192, 128, 64, 16, 8, 4, 0];
+        let image = RgbaImage::from_raw(2, 1, expected.clone()).unwrap();
+        let image = cg_image(Cow::Owned(image)).unwrap();
+        let provider = CGImage::data_provider(Some(&image)).unwrap();
+        drop(image);
+        assert_eq!(
+            CGDataProvider::data(Some(&provider)).unwrap().to_vec(),
+            expected
+        );
+    }
 }
