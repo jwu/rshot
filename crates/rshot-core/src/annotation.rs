@@ -49,7 +49,7 @@ impl Mark {
     fn apply(&self, image: &mut RgbaImage) {
         match self {
             Self::Arrow { start, end, stroke } => arrow(image, *start, *end, *stroke),
-            Self::Mosaic { start, end, block } => mosaic(image, *start, *end, *block),
+            Self::Mosaic { start, end, block } => mosaic(image, *start, *end, (*block).max(2)),
             Self::Text {
                 position: Point { x, y },
                 label,
@@ -220,7 +220,6 @@ fn mosaic(
 ) {
     let (left, right) = (x0.min(x1), x0.max(x1).saturating_add(1).min(image.width()));
     let (top, bottom) = (y0.min(y1), y0.max(y1).saturating_add(1).min(image.height()));
-    let block = block.max(2);
     for y in (top..bottom).step_by(block as usize) {
         for x in (left..right).step_by(block as usize) {
             let (end_x, end_y) = (

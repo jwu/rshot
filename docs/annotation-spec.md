@@ -13,6 +13,10 @@ Set `schema_version` to `1` and supply a `marks` array. Marks are drawn in array
 | `step` | `at` at the badge's center | `n` `null`, `size` `28`, `fill` `"#276EF1"`, `color` `"#FFFFFF"`, `label` `null` |
 | `highlight` | `rect` for the area | `color` `"#FFD84E"`, `opacity` `0.4`, `blend` `"multiply"` |
 | `redact` | `rect` for the area | `fill` `"#000000"` |
+| `mosaic` | `rect` for the area | `block` `12` |
+| `blur` | `rect` for the area | `radius` `12` |
+| `spotlight` | `rects` with one or more focus rectangles | `shape` `"rect"`, `opacity` `0.6`, `color` `"#000000"` |
+| `magnify` | `source` for the area to sample, `at` at the upper-left of the inset | `scale` `2.0`, `border` `"#276EF1"`, `width` `3`, `connector` `true` |
 
 `width` and `size` are positive integers in pixels. The rect `radius` is a nonnegative integer. Rect and ellipse strokes sit inside their outer bounds. Colors accept `#RGB`, `#RRGGBB`, and `#RRGGBBAA`. Redact replaces all four channels of the covered pixels with `fill`.
 
@@ -20,7 +24,13 @@ Highlight `opacity` ranges from 0 to 1 and multiplies the color's alpha. The def
 
 A step's `size` is its diameter. An omitted or `null` `n` starts at `1` or continues from one more than the highest preceding step number. Explicit numbers are positive integers. The badge shows its number, and its optional `label` is returned in the legend. Use a `text` mark for a visible label.
 
-## Example
+Mosaic averages the RGB channels in square blocks within the visible part of `rect` and makes them opaque. Blur applies a Gaussian approximation to the visible part of `rect` using `radius` as its standard deviation in pixels. The effective radius is capped at the longest visible side. `block` and `radius` are positive integers. Values below `8` produce a warning and still render. Mosaic and blur are unreliable for hiding sensitive information at any setting. Use an opaque `redact` mark to cover sensitive pixels.
+
+Spotlight applies the overlay outside the union of `rects`. Use `"rect"` for rectangular focus areas or `"ellipse"` for ellipses inscribed in those rectangles. `opacity` ranges from 0 to 1 and scales the overlay color's alpha.
+
+Magnify clips `source` to the input image, rounds its scaled dimensions to the nearest pixel, and samples it using nearest-neighbor interpolation. `scale` must be finite and at least `1`, and each scaled dimension of the requested `source` must fit in an unsigned 32-bit integer. `width` sets the inset's inside border thickness and the connector's stroke width. With `connector: true`, a line runs from the center of the sampled region to the center of the inset and is drawn beneath it. Magnify samples the original input, including pixels covered by earlier marks. Keep sensitive areas out of `source`, and apply opaque `redact` to any inset that contains them.
+
+## Examples
 
 Save this spec as `steps.json` and run `rshot-cli annotate settings.png --spec steps.json --json`. The two badges are numbered `1` and `2`.
 
@@ -36,6 +46,20 @@ Save this spec as `steps.json` and run `rshot-cli annotate settings.png --spec s
     {"type":"highlight","rect":{"x":813,"y":549,"w":132,"h":54},"opacity":0.22},
     {"type":"step","at":{"x":240,"y":390},"n":null,"label":"Enable the weekly digest"},
     {"type":"step","at":{"x":969,"y":575},"label":"Save changes"}
+  ]
+}
+```
+
+An effects spec can combine multiple spotlight focus areas with local filters and an inset from the same image.
+
+```json
+{
+  "schema_version": 1,
+  "marks": [
+    {"type":"spotlight","rects":[{"x":262,"y":363,"w":690,"h":53},{"x":813,"y":549,"w":132,"h":54}]},
+    {"type":"mosaic","rect":{"x":273,"y":373,"w":126,"h":32},"block":12},
+    {"type":"blur","rect":{"x":450,"y":373,"w":137,"h":32},"radius":12},
+    {"type":"magnify","source":{"x":850,"y":367,"w":87,"h":43},"at":{"x":620,"y":440},"scale":2.0}
   ]
 }
 ```

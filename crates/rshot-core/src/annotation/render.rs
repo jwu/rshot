@@ -1,10 +1,14 @@
-use image::{Rgba, RgbaImage};
+use image::{GrayImage, Rgba, Rgba32FImage, RgbaImage, imageops};
 use serde::Serialize;
 use tiny_skia::{FillRule, Mask, Path, PathBuilder, Transform};
 
-use super::spec::{AnnotateError, Color, HighlightBlend, MarkKind, MarkSpec, Spec, step_number};
-use super::{LineCoverage, arrow_segments};
+use super::spec::{
+    AnnotateError, Color, HighlightBlend, MagnifySpec, MarkKind, MarkSpec, Spec, SpotlightShape,
+    SpotlightSpec, step_number,
+};
+use super::{LineCoverage, arrow_segments, mosaic};
 use crate::geometry::{Point, Rect};
+use crate::locate::CoordinateMapping;
 
 #[cfg(target_os = "macos")]
 use crate::platform::macos::text::draw_positioned_text;
@@ -55,9 +59,10 @@ pub fn render(image: &RgbaImage, spec: &Spec) -> Result<Rendered, AnnotateError>
             image: &mut rendered.image,
             bounds: None,
             index,
+            warnings: &mut rendered.warnings,
         };
         let mut n = None;
-        let (area, field) = match mark {
+        let clip_check = match mark {
             MarkSpec::Rect(mark) => {
                 let area = widen(mark.rect);
                 canvas.outline(
@@ -67,18 +72,18 @@ pub fn render(image: &RgbaImage, spec: &Spec) -> Result<Rendered, AnnotateError>
                     mark.stroke,
                     mark.fill,
                 )?;
-                (area, "rect")
+                Some((area, "rect"))
             }
             MarkSpec::Ellipse(mark) => {
                 let area = widen(mark.rect);
                 canvas.outline(area, Shape::Ellipse, mark.width, mark.stroke, mark.fill)?;
-                (area, "rect")
+                Some((area, "rect"))
             }
-            MarkSpec::Arrow(mark) => (
+            MarkSpec::Arrow(mark) => Some((
                 canvas.arrow(mark.from, mark.to, mark.width, mark.stroke),
                 "from/to",
-            ),
-            MarkSpec::Text(mark) => (
+            )),
+            MarkSpec::Text(mark) => Some((
                 canvas.text(
                     &mark.text,
                     f64::from(mark.size),
@@ -87,7 +92,7 @@ pub fn render(image: &RgbaImage, spec: &Spec) -> Result<Rendered, AnnotateError>
                     TextAnchor::TopLeft(Point::new(i64::from(mark.at.x), i64::from(mark.at.y))),
                 )?,
                 "at",
-            ),
+            )),
             MarkSpec::Step(mark) => {
                 let number = step_number(index, mark.n, &mut highest)?;
                 let value = number.to_string();
@@ -114,25 +119,52 @@ pub fn render(image: &RgbaImage, spec: &Spec) -> Result<Rendered, AnnotateError>
                     n: number,
                     label: mark.label.clone(),
                 });
-                (area, "at")
+                Some((area, "at"))
             }
             MarkSpec::Highlight(mark) => {
                 let area = widen(mark.rect);
                 canvas.highlight(area, mark.color, mark.opacity, mark.blend);
-                (area, "rect")
+                Some((area, "rect"))
             }
             MarkSpec::Redact(mark) => {
                 let area = widen(mark.rect);
                 canvas.solid(area, mark.fill, true);
-                (area, "rect")
+                Some((area, "rect"))
+            }
+            MarkSpec::Mosaic(mark) => {
+                let area = widen(mark.rect);
+                if mark.block < 8 {
+                    canvas.warn(
+                        "block",
+                        "a block size below 8 pixels produces a weak mosaic",
+                    );
+                }
+                canvas.mosaic(area, mark.block);
+                Some((area, "rect"))
+            }
+            MarkSpec::Blur(mark) => {
+                let area = widen(mark.rect);
+                if mark.radius < 8 {
+                    canvas.warn("radius", "a radius below 8 pixels produces a weak blur");
+                }
+                canvas.blur(area, mark.radius);
+                Some((area, "rect"))
+            }
+            MarkSpec::Spotlight(mark) => {
+                canvas.spotlight(mark);
+                mark.rects
+                    .iter()
+                    .map(|&rect| widen(rect))
+                    .find(|&area| outside(area, image.dimensions()))
+                    .map(|area| (area, "rects"))
+            }
+            MarkSpec::Magnify(mark) => {
+                canvas.warn_if_clipped(widen(mark.source), "source");
+                Some((canvas.magnify(image, mark), "at"))
             }
         };
-        if outside(area, image.dimensions()) {
-            rendered.warnings.push(RenderWarning {
-                index,
-                field,
-                message: "mark extends outside the image and was clipped",
-            });
+        if let Some((area, field)) = clip_check {
+            canvas.warn_if_clipped(area, field);
         }
         rendered.marks.push(RenderedMark {
             index,
@@ -214,9 +246,24 @@ struct Canvas<'a> {
     image: &'a mut RgbaImage,
     bounds: Option<[u32; 4]>,
     index: usize,
+    warnings: &'a mut Vec<RenderWarning>,
 }
 
 impl Canvas<'_> {
+    fn warn(&mut self, field: &'static str, message: &'static str) {
+        self.warnings.push(RenderWarning {
+            index: self.index,
+            field,
+            message,
+        });
+    }
+
+    fn warn_if_clipped(&mut self, area: Rect<i64>, field: &'static str) {
+        if outside(area, self.image.dimensions()) {
+            self.warn(field, "mark extends outside the image and was clipped");
+        }
+    }
+
     fn bounds(&self) -> Rect<u32> {
         match self.bounds {
             Some([l, t, r, b]) => Rect::new(l, t, r - l + 1, b - t + 1),
@@ -231,8 +278,8 @@ impl Canvas<'_> {
         });
     }
 
-    fn highlight(&mut self, area: Rect<i64>, mut color: Color, opacity: f64, mode: HighlightBlend) {
-        color.0[3] = (f64::from(color.0[3]) * opacity).round() as u8;
+    fn highlight(&mut self, area: Rect<i64>, color: Color, opacity: f64, mode: HighlightBlend) {
+        let color = apply_opacity(color, opacity);
         if color.0[3] == 0 {
             return;
         }
@@ -304,6 +351,130 @@ impl Canvas<'_> {
         }
     }
 
+    fn mosaic(&mut self, area: Rect<i64>, block: u32) {
+        let region = area.clip(self.image.dimensions());
+        let Point { x, y } = region.origin;
+        let (width, height) = (region.size.width, region.size.height);
+        if width == 0 || height == 0 {
+            return;
+        }
+        let end = Point::new(x + width - 1, y + height - 1);
+        mosaic(self.image, region.origin, end, block);
+        self.include(x, y);
+        self.include(end.x, end.y);
+    }
+
+    fn blur(&mut self, area: Rect<i64>, radius: u32) {
+        let region = area.clip(self.image.dimensions());
+        let Point { x, y } = region.origin;
+        let (width, height) = (region.size.width, region.size.height);
+        if width == 0 || height == 0 {
+            return;
+        }
+        let premultiplied = Rgba32FImage::from_fn(width, height, |col, row| {
+            let [r, g, b, a] = self
+                .image
+                .get_pixel(x + col, y + row)
+                .0
+                .map(|c| f32::from(c) / 255.);
+            Rgba([r * a, g * a, b * a, a])
+        });
+        let blurred = imageops::fast_blur(&premultiplied, radius.min(width.max(height)) as f32);
+        for (col, row, &Rgba([r, g, b, a])) in blurred.enumerate_pixels() {
+            let byte = |channel: f32| (channel * 255.).round() as u8;
+            let pixel = if byte(a) == 0 {
+                Rgba([0; 4])
+            } else {
+                Rgba([byte(r / a), byte(g / a), byte(b / a), byte(a)])
+            };
+            self.image.put_pixel(x + col, y + row, pixel);
+        }
+        self.include(x, y);
+        self.include(x + width - 1, y + height - 1);
+    }
+
+    fn spotlight(&mut self, mark: &SpotlightSpec) {
+        let color = apply_opacity(mark.color, mark.opacity);
+        if color.0[3] == 0 {
+            return;
+        }
+        let (width, height) = self.image.dimensions();
+        let mut focus = GrayImage::new(width, height);
+        for &rect in &mark.rects {
+            let area = widen(rect);
+            let region = area.clip((width, height));
+            let Point { x, y } = region.origin;
+            let half_width = f64::from(rect.size.width) / 2.;
+            let half_height = f64::from(rect.size.height) / 2.;
+            let center = center(area);
+            for row in y..y + region.size.height {
+                let dy = (f64::from(row) + 0.5 - center.y) / half_height;
+                for col in x..x + region.size.width {
+                    let dx = (f64::from(col) + 0.5 - center.x) / half_width;
+                    if mark.shape == SpotlightShape::Rect || dx * dx + dy * dy <= 1. {
+                        focus.get_pixel_mut(col, row).0[0] = 1;
+                    }
+                }
+            }
+        }
+        for (x, y, pixel) in focus.enumerate_pixels() {
+            if pixel.0[0] == 0 {
+                self.blend(x, y, Rgba(color.0));
+            }
+        }
+    }
+
+    fn magnify(&mut self, source: &RgbaImage, mark: &MagnifySpec) -> Rect<i64> {
+        let sample = widen(mark.source).clip(source.dimensions());
+        let (width, height) = (sample.size.width, sample.size.height);
+        if width == 0 || height == 0 {
+            return Rect::new(0, 0, 0, 0);
+        }
+        let area = Rect::new(
+            i64::from(mark.at.x),
+            i64::from(mark.at.y),
+            (f64::from(width) * mark.scale).round() as i64,
+            (f64::from(height) * mark.scale).round() as i64,
+        );
+        if mark.connector {
+            let source_area = Rect::new(
+                i64::from(sample.origin.x),
+                i64::from(sample.origin.y),
+                i64::from(width),
+                i64::from(height),
+            );
+            let connector = self.stroke_lines(
+                [(center(source_area), center(area))],
+                f64::from(mark.width),
+                mark.border,
+            );
+            self.warn_if_clipped(connector, "connector");
+        }
+        let mapping = CoordinateMapping {
+            offset: sample.origin,
+            scale: mark.scale,
+        };
+        let border = i64::from(mark.width);
+        let region = area.clip(self.image.dimensions());
+        let Point { x, y } = region.origin;
+        for row in y..y + region.size.height {
+            for col in x..x + region.size.width {
+                let dx = i64::from(col) - area.origin.x;
+                let dy = i64::from(row) - area.origin.y;
+                let from = mapping.source_pixel(Point::new(dx as u32, dy as u32));
+                self.blend(col, row, *source.get_pixel(from.x, from.y));
+                if dx < border
+                    || dy < border
+                    || dx >= area.size.width - border
+                    || dy >= area.size.height - border
+                {
+                    self.blend(col, row, Rgba(mark.border.0));
+                }
+            }
+        }
+        area
+    }
+
     fn mask(
         &mut self,
         area: Rect<i64>,
@@ -373,9 +544,25 @@ impl Canvas<'_> {
         let coords =
             |point: Point<i32>| Point::new(f64::from(point.x) + 0.5, f64::from(point.y) + 0.5);
         let width = f64::from(width);
-        let segments = arrow_segments(coords(from), coords(to), width);
-        let start = segments[0].0;
-        let mut ends = [start.x, start.y, start.x, start.y];
+        self.stroke_lines(
+            arrow_segments(coords(from), coords(to), width),
+            width,
+            color,
+        )
+    }
+
+    fn stroke_lines<const N: usize>(
+        &mut self,
+        segments: [(Point<f64>, Point<f64>); N],
+        width: f64,
+        color: Color,
+    ) -> Rect<i64> {
+        let mut ends = [
+            f64::INFINITY,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::NEG_INFINITY,
+        ];
         for (a, b) in segments {
             ends[0] = ends[0].min(a.x).min(b.x);
             ends[1] = ends[1].min(a.y).min(b.y);
@@ -471,6 +658,18 @@ impl Canvas<'_> {
             "text rendering requires macOS",
         ))
     }
+}
+
+fn center(area: Rect<i64>) -> Point<f64> {
+    Point::new(
+        area.origin.x as f64 + area.size.width as f64 / 2.,
+        area.origin.y as f64 + area.size.height as f64 / 2.,
+    )
+}
+
+fn apply_opacity(mut color: Color, opacity: f64) -> Color {
+    color.0[3] = (f64::from(color.0[3]) * opacity).round() as u8;
+    color
 }
 
 fn multiply_alpha(first: u8, second: u8) -> u8 {

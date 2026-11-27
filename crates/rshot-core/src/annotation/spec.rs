@@ -63,16 +63,12 @@ impl Spec {
                 MarkSpec::Ellipse(mark) => Some(mark.rect),
                 MarkSpec::Highlight(mark) => Some(mark.rect),
                 MarkSpec::Redact(mark) => Some(mark.rect),
+                MarkSpec::Mosaic(mark) => Some(mark.rect),
+                MarkSpec::Blur(mark) => Some(mark.rect),
                 _ => None,
             };
             if let Some(rect) = rect {
-                for (field, dimension) in
-                    [("rect.w", rect.size.width), ("rect.h", rect.size.height)]
-                {
-                    if dimension < 0 {
-                        return Err(AnnotateError::field(index, field, "must be nonnegative"));
-                    }
-                }
+                validate_rect(index, "rect", rect)?;
             }
             let field = match mark {
                 MarkSpec::Rect(mark) if mark.width == 0 => "width",
@@ -84,12 +80,47 @@ impl Spec {
                     step_number(index, mark.n, &mut highest)?;
                     continue;
                 }
-                MarkSpec::Highlight(mark) if !(0.0..=1.0).contains(&mark.opacity) => {
-                    return Err(AnnotateError::field(
-                        index,
-                        "opacity",
-                        "must be between 0 and 1",
-                    ));
+                MarkSpec::Highlight(mark) => {
+                    validate_opacity(index, mark.opacity)?;
+                    continue;
+                }
+                MarkSpec::Mosaic(mark) if mark.block == 0 => "block",
+                MarkSpec::Blur(mark) if mark.radius == 0 => "radius",
+                MarkSpec::Spotlight(mark) => {
+                    if mark.rects.is_empty() {
+                        return Err(AnnotateError::field(
+                            index,
+                            "rects",
+                            "must contain a rectangle",
+                        ));
+                    }
+                    for (position, &rect) in mark.rects.iter().enumerate() {
+                        validate_rect(index, &format!("rects[{position}]"), rect)?;
+                    }
+                    validate_opacity(index, mark.opacity)?;
+                    continue;
+                }
+                MarkSpec::Magnify(mark) => {
+                    validate_rect(index, "source", mark.source)?;
+                    if !mark.scale.is_finite() || mark.scale < 1.0 {
+                        return Err(AnnotateError::field(
+                            index,
+                            "scale",
+                            "must be finite and at least 1",
+                        ));
+                    }
+                    let longest_side = mark.source.size.width.max(mark.source.size.height);
+                    if (f64::from(longest_side) * mark.scale).round() > f64::from(u32::MAX) {
+                        return Err(AnnotateError::field(
+                            index,
+                            "scale",
+                            "scaled dimensions must fit in u32",
+                        ));
+                    }
+                    if mark.width != 0 {
+                        continue;
+                    }
+                    "width"
                 }
                 _ => continue,
             };
@@ -101,6 +132,30 @@ impl Spec {
         }
         Ok(())
     }
+}
+
+fn validate_rect(index: usize, field: &str, rect: Rect<i32>) -> Result<(), AnnotateError> {
+    for (suffix, dimension) in [("w", rect.size.width), ("h", rect.size.height)] {
+        if dimension < 0 {
+            return Err(AnnotateError::field(
+                index,
+                format!("{field}.{suffix}"),
+                "must be nonnegative",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_opacity(index: usize, opacity: f64) -> Result<(), AnnotateError> {
+    if !(0.0..=1.0).contains(&opacity) {
+        return Err(AnnotateError::field(
+            index,
+            "opacity",
+            "must be between 0 and 1",
+        ));
+    }
+    Ok(())
 }
 
 pub(super) fn step_number(
@@ -169,6 +224,10 @@ pub enum MarkKind {
     Step,
     Highlight,
     Redact,
+    Mosaic,
+    Blur,
+    Spotlight,
+    Magnify,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -181,6 +240,10 @@ pub enum MarkSpec {
     Step(StepSpec),
     Highlight(HighlightSpec),
     Redact(RedactSpec),
+    Mosaic(MosaicSpec),
+    Blur(BlurSpec),
+    Spotlight(SpotlightSpec),
+    Magnify(MagnifySpec),
 }
 
 impl MarkSpec {
@@ -193,6 +256,10 @@ impl MarkSpec {
             Self::Step(_) => MarkKind::Step,
             Self::Highlight(_) => MarkKind::Highlight,
             Self::Redact(_) => MarkKind::Redact,
+            Self::Mosaic(_) => MarkKind::Mosaic,
+            Self::Blur(_) => MarkKind::Blur,
+            Self::Spotlight(_) => MarkKind::Spotlight,
+            Self::Magnify(_) => MarkKind::Magnify,
         }
     }
 
@@ -228,6 +295,10 @@ impl MarkSpec {
             MarkKind::Step => Self::Step(fields(index, value)?),
             MarkKind::Highlight => Self::Highlight(fields(index, value)?),
             MarkKind::Redact => Self::Redact(fields(index, value)?),
+            MarkKind::Mosaic => Self::Mosaic(fields(index, value)?),
+            MarkKind::Blur => Self::Blur(fields(index, value)?),
+            MarkKind::Spotlight => Self::Spotlight(fields(index, value)?),
+            MarkKind::Magnify => Self::Magnify(fields(index, value)?),
         })
     }
 }
@@ -321,6 +392,53 @@ pub struct RedactSpec {
     pub fill: Color,
 }
 
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct MosaicSpec {
+    pub rect: Rect<i32>,
+    #[serde(default = "effect_size")]
+    pub block: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct BlurSpec {
+    pub rect: Rect<i32>,
+    #[serde(default = "effect_size")]
+    pub radius: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct SpotlightSpec {
+    pub rects: Vec<Rect<i32>>,
+    #[serde(default)]
+    pub shape: SpotlightShape,
+    #[serde(default = "spotlight_opacity")]
+    pub opacity: f64,
+    #[serde(default = "black")]
+    pub color: Color,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SpotlightShape {
+    #[default]
+    Rect,
+    Ellipse,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct MagnifySpec {
+    pub source: Rect<i32>,
+    pub at: Point<i32>,
+    #[serde(default = "magnify_scale")]
+    pub scale: f64,
+    #[serde(default = "blue")]
+    pub border: Color,
+    #[serde(default = "outline_width")]
+    pub width: u32,
+    #[serde(default = "magnify_connector")]
+    pub connector: bool,
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct Color(pub [u8; 4]);
@@ -398,4 +516,16 @@ fn step_size() -> u32 {
 }
 fn highlight_opacity() -> f64 {
     0.4
+}
+fn effect_size() -> u32 {
+    12
+}
+fn spotlight_opacity() -> f64 {
+    0.6
+}
+fn magnify_scale() -> f64 {
+    2.0
+}
+fn magnify_connector() -> bool {
+    true
 }

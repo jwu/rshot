@@ -1,4 +1,4 @@
-use image::{Rgba, RgbaImage};
+use image::{GenericImageView, Rgba, RgbaImage, imageops};
 #[cfg(target_os = "macos")]
 use rshot_core::annotation::LegendEntry;
 use rshot_core::annotation::{Rendered, Spec, render};
@@ -136,6 +136,206 @@ fn multiply_highlight_accounts_for_backdrop_and_color_alpha() {
     assert_eq!(rendered.image.get_pixel(0, 0), &Rgba([19, 35, 50, 255]));
     assert_eq!(rendered.image.get_pixel(1, 0), &Rgba([55, 56, 56, 160]));
     assert_eq!(rendered.image.get_pixel(2, 0), &Rgba([200, 140, 80, 64]));
+}
+
+#[test]
+fn mosaic_averages_each_visible_block_without_changing_the_surroundings() {
+    let source = RgbaImage::from_fn(8, 6, |x, y| Rgba([10 * x as u8, 10 * y as u8, 170, 255]));
+    let rendered = render_marks(
+        &source,
+        json!([
+            {"type":"mosaic","rect":{"x":-1,"y":1,"w":6,"h":4},"block":3}
+        ]),
+    );
+    for (x, y, pixel) in rendered.image.enumerate_pixels() {
+        let expected = match (x, y) {
+            (0..=2, 1..=3) => Rgba([10, 20, 170, 255]),
+            (3..=4, 1..=3) => Rgba([35, 20, 170, 255]),
+            (0..=2, 4) => Rgba([10, 40, 170, 255]),
+            (3..=4, 4) => Rgba([35, 40, 170, 255]),
+            _ => *source.get_pixel(x, y),
+        };
+        assert_eq!(*pixel, expected, "at ({x}, {y})");
+    }
+    assert_eq!(rendered.marks[0].bounds, Rect::new(0, 1, 5, 4));
+    assert_eq!(rendered.warnings.len(), 2);
+    assert_eq!(
+        (rendered.warnings[0].index, rendered.warnings[0].field),
+        (0, "block")
+    );
+    assert_eq!(rendered.warnings[1].field, "rect");
+}
+
+#[test]
+fn blur_reduces_variance_inside_its_rectangle() {
+    let source = RgbaImage::from_fn(40, 38, |x, y| {
+        let value = ((x + y) % 2 * 255) as u8;
+        Rgba([value, value, value, 255])
+    });
+    let rendered = render_marks(
+        &source,
+        json!([
+            {"type":"blur","rect":{"x":6,"y":8,"w":24,"h":20},"radius":4}
+        ]),
+    );
+    let variance = |image: &RgbaImage| {
+        let pixels: Vec<_> = imageops::crop_imm(image, 6, 8, 24, 20)
+            .pixels()
+            .map(|(_, _, pixel)| f64::from(pixel[0]))
+            .collect();
+        let mean = pixels.iter().sum::<f64>() / pixels.len() as f64;
+        pixels
+            .iter()
+            .map(|value| (value - mean).powi(2))
+            .sum::<f64>()
+            / pixels.len() as f64
+    };
+    assert!(variance(&rendered.image) < variance(&source) / 10.);
+    for (x, y, pixel) in rendered.image.enumerate_pixels() {
+        if !(6..30).contains(&x) || !(8..28).contains(&y) {
+            assert_eq!(pixel, source.get_pixel(x, y));
+        }
+        assert_eq!(pixel[3], 255);
+    }
+    assert_eq!(rendered.marks[0].bounds, Rect::new(6, 8, 24, 20));
+    assert_eq!(rendered.warnings.len(), 1);
+    assert_eq!(
+        (rendered.warnings[0].index, rendered.warnings[0].field),
+        (0, "radius")
+    );
+}
+
+#[test]
+fn blur_ignores_color_in_transparent_pixels() {
+    let source = RgbaImage::from_fn(9, 4, |x, _| {
+        if x < 4 {
+            Rgba([255, 0, 0, 255])
+        } else {
+            Rgba([0, 0, 255, 0])
+        }
+    });
+    let rendered = render_marks(
+        &source,
+        json!([
+            {"type":"blur","rect":{"x":0,"y":0,"w":9,"h":4},"radius":4294967295u32}
+        ]),
+    );
+    let pixel = rendered.image.get_pixel(4, 1);
+    assert_eq!(&pixel.0[..3], &[255, 0, 0]);
+    assert!((1..255).contains(&pixel[3]));
+}
+
+#[test]
+fn spotlight_preserves_the_union_of_its_focus_areas() {
+    let base = Rgba([200, 100, 50, 255]);
+    let source = RgbaImage::from_pixel(18, 12, base);
+    let rendered = render_marks(
+        &source,
+        json!([
+            {"type":"spotlight","rects":[{"x":2,"y":2,"w":8,"h":8},{"x":7,"y":2,"w":8,"h":8}],"shape":"ellipse"}
+        ]),
+    );
+    for (x, y) in [(2, 2), (0, 0), (17, 11), (15, 5)] {
+        assert_eq!(rendered.image.get_pixel(x, y), &Rgba([80, 40, 20, 255]));
+    }
+    for (x, y) in [(5, 5), (8, 5), (11, 5)] {
+        assert_eq!(rendered.image.get_pixel(x, y), &base);
+    }
+    assert_eq!(rendered.marks[0].bounds, Rect::new(0, 0, 18, 12));
+    assert!(rendered.warnings.is_empty());
+}
+
+#[test]
+fn spotlight_reports_only_the_bounds_it_dims() {
+    let source = RgbaImage::from_pixel(6, 4, Rgba([200, 100, 50, 255]));
+    let rendered = render_marks(
+        &source,
+        json!([
+            {"type":"spotlight","rects":[{"x":-1,"y":0,"w":5,"h":4}],"color":"#00000080","opacity":0.5},
+            {"type":"spotlight","rects":[{"x":0,"y":0,"w":6,"h":4}]}
+        ]),
+    );
+    assert_eq!(rendered.image.get_pixel(0, 0), source.get_pixel(0, 0));
+    assert_eq!(rendered.image.get_pixel(3, 3), source.get_pixel(3, 3));
+    assert_eq!(rendered.image.get_pixel(4, 3), &Rgba([150, 75, 37, 255]));
+    assert_eq!(rendered.marks[0].bounds, Rect::new(4, 0, 2, 4));
+    assert_eq!(rendered.marks[1].bounds, Rect::new(0, 0, 0, 0));
+    assert_eq!(rendered.warnings.len(), 1);
+    assert_eq!(
+        (rendered.warnings[0].index, rendered.warnings[0].field),
+        (0, "rects")
+    );
+}
+
+#[test]
+fn magnify_samples_the_original_at_nearest_neighbor_resolution() {
+    let source = RgbaImage::from_fn(44, 24, |x, y| Rgba([x as u8, y as u8, 170, 255]));
+    let rendered = render_marks(
+        &source,
+        json!([
+            {"type":"redact","rect":{"x":2,"y":3,"w":5,"h":4}},
+            {"type":"magnify","source":{"x":2,"y":3,"w":5,"h":4},"at":{"x":20,"y":8},"scale":2.5,"width":1,"connector":false}
+        ]),
+    );
+    for (x, y, pixel) in rendered.image.enumerate_pixels() {
+        let expected = match (x, y) {
+            (2..=6, 3..=6) => Rgba([0, 0, 0, 255]),
+            (20 | 32, 8..=17) | (20..=32, 8 | 17) => Rgba([39, 110, 241, 255]),
+            (21..=31, 9..=16) => *source.get_pixel(2 + (x - 20) * 2 / 5, 3 + (y - 8) * 2 / 5),
+            _ => *source.get_pixel(x, y),
+        };
+        assert_eq!(*pixel, expected, "at ({x}, {y})");
+    }
+    assert_eq!(rendered.marks[1].bounds, Rect::new(20, 8, 13, 10));
+    assert!(rendered.warnings.is_empty());
+}
+
+#[test]
+fn magnify_connector_contributes_to_its_bounds() {
+    let source = RgbaImage::from_pixel(32, 20, Rgba([255; 4]));
+    let rendered = render_marks(
+        &source,
+        json!([
+            {"type":"magnify","source":{"x":1,"y":2,"w":5,"h":5},"at":{"x":15,"y":0},"width":1}
+        ]),
+    );
+    assert_eq!(rendered.image.get_pixel(7, 4), &Rgba([65, 128, 243, 255]));
+    assert_eq!(rendered.image.get_pixel(8, 6), &Rgba([255; 4]));
+    assert_eq!(rendered.marks[0].bounds, Rect::new(3, 0, 22, 10));
+    assert!(rendered.warnings.is_empty());
+
+    let clipped = render_marks(
+        &source,
+        json!([
+            {"type":"magnify","source":{"x":1,"y":2,"w":5,"h":5},"at":{"x":15,"y":0},"width":12}
+        ]),
+    );
+    assert_eq!(clipped.warnings.len(), 1);
+    assert_eq!(clipped.warnings[0].field, "connector");
+}
+
+#[test]
+fn magnify_clips_the_source_and_destination() {
+    let source = RgbaImage::from_fn(12, 8, |x, y| Rgba([x as u8, y as u8, 100, 255]));
+    let rendered = render_marks(
+        &source,
+        json!([
+            {"type":"magnify","source":{"x":-2,"y":1,"w":5,"h":3},"at":{"x":-2,"y":4},"border":"#0000FF00","connector":false},
+            {"type":"magnify","source":{"x":20,"y":1,"w":5,"h":3},"at":{"x":0,"y":0}}
+        ]),
+    );
+    assert_eq!(rendered.image.get_pixel(0, 4), source.get_pixel(1, 1));
+    assert_eq!(rendered.image.get_pixel(3, 7), source.get_pixel(2, 2));
+    assert_eq!(rendered.marks[0].bounds, Rect::new(0, 4, 4, 4));
+    assert_eq!(rendered.marks[1].bounds, Rect::new(0, 0, 0, 0));
+    assert_eq!(
+        rendered
+            .warnings
+            .iter()
+            .map(|warning| (warning.index, warning.field))
+            .collect::<Vec<_>>(),
+        [(0, "source"), (0, "at"), (1, "source")]
+    );
 }
 
 #[test]
@@ -321,13 +521,39 @@ fn geometric_marks_match_the_golden_image() {
             {"type":"step","at":{"x":110,"y":34},"size":22,"color":"#FFFFFF00"}
         ]),
     );
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden/annotation.png");
+    assert_golden(&rendered.image, "annotation.png");
+}
+
+#[test]
+fn effect_marks_match_the_golden_image() {
+    let source = RgbaImage::from_fn(128, 96, |x, y| {
+        let pattern = ((x * 13) ^ (y * 37)) % 80;
+        Rgba([120 + pattern as u8, 50 + x as u8, 60 + y as u8, 255])
+    });
+    let rendered = render_marks(
+        &source,
+        json!([
+            {"type":"spotlight","rects":[{"x":5,"y":5,"w":56,"h":46},{"x":68,"y":3,"w":48,"h":42}],"shape":"ellipse"},
+            {"type":"blur","rect":{"x":12,"y":15,"w":42,"h":25},"radius":8},
+            {"type":"mosaic","rect":{"x":71,"y":14,"w":37,"h":25},"block":8},
+            {"type":"highlight","rect":{"x":73,"y":73,"w":45,"h":10}},
+            {"type":"magnify","source":{"x":79,"y":18,"w":18,"h":14},"at":{"x":25,"y":47},"scale":3.0}
+        ]),
+    );
+    assert!(rendered.warnings.is_empty());
+    assert_golden(&rendered.image, "annotation-effects.png");
+}
+
+fn assert_golden(image: &RgbaImage, filename: &str) {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/golden")
+        .join(filename);
     if std::env::var_os("RSHOT_UPDATE_GOLDEN").is_some_and(|value| value == "1") {
-        rendered.image.save(&path).unwrap();
+        image.save(&path).unwrap();
     }
     let golden = image::open(&path).unwrap().to_rgba8();
-    assert_eq!(rendered.image.dimensions(), golden.dimensions());
-    for (x, y, pixel) in rendered.image.enumerate_pixels() {
+    assert_eq!(image.dimensions(), golden.dimensions());
+    for (x, y, pixel) in image.enumerate_pixels() {
         assert_eq!(
             pixel,
             golden.get_pixel(x, y),

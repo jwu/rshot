@@ -12,7 +12,11 @@ fn spec_round_trips_with_defaults_and_canonical_colors() {
             {"type":"text", "at":{"x":52,"y":155}, "background":"#ffffffcc"},
             {"type":"step", "at":{"x":28,"y":170}, "n":null, "label":null},
             {"type":"highlight", "rect":{"x":20,"y":30,"w":280,"h":80}},
-            {"type":"redact", "rect":{"x":-4,"y":7,"w":8,"h":9}}
+            {"type":"redact", "rect":{"x":-4,"y":7,"w":8,"h":9}},
+            {"type":"mosaic", "rect":{"x":20,"y":30,"w":280,"h":80}},
+            {"type":"blur", "rect":{"x":20,"y":30,"w":280,"h":80}},
+            {"type":"spotlight", "rects":[{"x":20,"y":30,"w":280,"h":80}]},
+            {"type":"magnify", "source":{"x":20,"y":30,"w":28,"h":8}, "at":{"x":20,"y":60}}
         ]
     });
     let spec: Spec = serde_json::from_value(input).unwrap();
@@ -24,7 +28,11 @@ fn spec_round_trips_with_defaults_and_canonical_colors() {
         {"type":"text", "at":{"x":52,"y":155}, "text":"", "size":22, "color":"#111111", "background":"#FFFFFFCC"},
         {"type":"step", "at":{"x":28,"y":170}, "n":null, "size":28, "fill":"#276EF1", "color":"#FFFFFF", "label":null},
         {"type":"highlight", "rect":{"x":20,"y":30,"w":280,"h":80}, "color":"#FFD84E", "opacity":0.4, "blend":"multiply"},
-        {"type":"redact", "rect":{"x":-4,"y":7,"w":8,"h":9}, "fill":"#000000"}
+        {"type":"redact", "rect":{"x":-4,"y":7,"w":8,"h":9}, "fill":"#000000"},
+        {"type":"mosaic", "rect":{"x":20,"y":30,"w":280,"h":80}, "block":12},
+        {"type":"blur", "rect":{"x":20,"y":30,"w":280,"h":80}, "radius":12},
+        {"type":"spotlight", "rects":[{"x":20,"y":30,"w":280,"h":80}], "shape":"rect", "opacity":0.6, "color":"#000000"},
+        {"type":"magnify", "source":{"x":20,"y":30,"w":28,"h":8}, "at":{"x":20,"y":60}, "scale":2.0, "border":"#276EF1", "width":3, "connector":true}
     ]);
     assert_eq!(wire, json!({"schema_version":1,"marks":expected}));
     assert_eq!(Spec::from_json(&wire.to_string()).unwrap(), spec);
@@ -101,6 +109,61 @@ fn invalid_marks_identify_their_index_and_field() {
             json!({"type":"text","at":{"x":0,"y":0}, "background":"#hélo"}),
             "background",
             "expected a hex color",
+        ),
+        (
+            json!({"type":"mosaic","rect":{"x":0,"y":0,"w":2,"h":1},"block":0}),
+            "block",
+            "greater than zero",
+        ),
+        (
+            json!({"type":"blur","rect":{"x":0,"y":0,"w":2,"h":1},"radius":0}),
+            "radius",
+            "greater than zero",
+        ),
+        (
+            json!({"type":"spotlight","rects":[]}),
+            "rects",
+            "must contain a rectangle",
+        ),
+        (
+            json!({"type":"spotlight","rects":[{"x":0,"y":0,"w":1,"h":1},{"x":0,"y":0,"w":1,"h":-2}]}),
+            "rects[1].h",
+            "must be nonnegative",
+        ),
+        (
+            json!({"type":"spotlight","rects":[{"x":0,"y":0,"w":1}],"shape":"rect"}),
+            "rects[0].h",
+            "missing field",
+        ),
+        (
+            json!({"type":"spotlight","rects":[{"x":0,"y":0,"w":1,"h":1}],"shape":"oval"}),
+            "shape",
+            "unknown variant",
+        ),
+        (
+            json!({"type":"spotlight","rects":[{"x":0,"y":0,"w":1,"h":1}],"opacity":-0.1}),
+            "opacity",
+            "between 0 and 1",
+        ),
+        (
+            json!({"type":"magnify","source":{"x":1,"y":2,"w":-3,"h":4},"at":{"x":0,"y":0}}),
+            "source.w",
+            "must be nonnegative",
+        ),
+        (
+            json!({"type":"magnify","source":{"x":1,"y":2,"w":3,"h":4},"at":{"x":0,"y":0},"scale":0.5}),
+            "scale",
+            "at least 1",
+        ),
+        (
+            json!({"type":"magnify","source":{"x":1,"y":2,"w":3,"h":4},"at":{"x":0,"y":0},"scale":1e10}),
+            "scale",
+            "scaled dimensions",
+        ),
+        (
+            json!({"type":"magnify","source":{"x":1,"y":2,"w":3,"h":4},"at":{"x":0,"y":0},"width":0}),
+            "width",
+            "greater than zero",
         ),
     ];
     for (mark, field, message) in cases {
