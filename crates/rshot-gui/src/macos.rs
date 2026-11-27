@@ -1,9 +1,35 @@
+use std::mem::{offset_of, size_of};
+
 use anyhow::{Context, Result, anyhow, ensure};
 use gpui::Window;
+use mach2::{
+    kern_return::KERN_SUCCESS,
+    task::task_info,
+    task_info::{TASK_VM_INFO, task_vm_info},
+    traps::mach_task_self,
+};
 use objc2_app_kit::{NSView, NSWindowStyleMask};
 use objc2_core_foundation::{CGPoint, CGRect};
 use objc2_core_graphics::{CGDisplayBounds, CGMainDisplayID};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+pub(crate) fn physical_footprint() -> Option<u64> {
+    let mut info = task_vm_info::default();
+    const WORD: usize = size_of::<i32>();
+    const REQUIRED_WORDS: u32 =
+        ((offset_of!(task_vm_info, phys_footprint) + size_of::<u64>()) / WORD) as u32;
+    let mut count = (size_of::<task_vm_info>() / WORD) as u32;
+    // SAFETY: The buffer is writable for `count` Mach words, and the target is this task.
+    let result = unsafe {
+        task_info(
+            mach_task_self(),
+            TASK_VM_INFO,
+            (&raw mut info).cast(),
+            &mut count,
+        )
+    };
+    (result == KERN_SUCCESS && count >= REQUIRED_WORDS).then_some(info.phys_footprint)
+}
 
 pub fn fit_capture_overlay(window: &Window, display_id: u32) -> Result<()> {
     let display = CGDisplayBounds(display_id);
@@ -43,7 +69,12 @@ fn appkit_frame(display: CGRect, main_height: f64) -> CGRect {
 mod tests {
     use objc2_core_foundation::CGSize;
 
-    use super::{CGPoint, CGRect, appkit_frame};
+    use super::{CGPoint, CGRect, appkit_frame, physical_footprint};
+
+    #[test]
+    fn reports_nonzero_footprint_for_the_current_task() {
+        assert!(physical_footprint().is_some_and(|bytes| bytes > 0));
+    }
 
     #[test]
     fn overlay_frame_uses_full_display_coordinates() {

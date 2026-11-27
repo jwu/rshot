@@ -17,7 +17,7 @@ use rshot_core::{
 
 use super::{
     BACKGROUND, FOREGROUND, MUTED, PANEL, button, close_window, place, preview::Preview,
-    render_image, selection_rect,
+    render_image, selection_rect, trace::CaptureTrace,
 };
 
 const TOOLBAR: f32 = 58.;
@@ -25,12 +25,17 @@ const FOOTER: f32 = 38.;
 const MARGIN: f32 = 16.;
 const GUIDE_COLOR: u32 = 0xff5566;
 
+pub(super) struct EditorImage {
+    pub(super) rgba: Arc<RgbaImage>,
+    pub(super) texture: Option<Arc<RenderImage>>,
+}
+
 pub(super) fn open(
-    image: Arc<RgbaImage>,
-    texture: Option<Arc<RenderImage>>,
+    image: EditorImage,
     scale: f32,
     display: DisplayId,
     screen: Size<Pixels>,
+    trace: Option<CaptureTrace>,
     on_open: impl FnOnce(),
     cx: &mut App,
 ) -> Result<()> {
@@ -56,9 +61,15 @@ pub(super) fn open(
             cx.new(|cx| {
                 let focus = cx.focus_handle();
                 focus.focus(window);
-                let texture = texture.unwrap_or_else(|| render_image((*image).clone()));
+                if let Some(trace) = trace {
+                    trace.first_frame("editor_first_frame", window);
+                    trace.window_closed("editor_closed", cx);
+                }
+                let texture = image
+                    .texture
+                    .unwrap_or_else(|| render_image((*image.rgba).clone()));
                 Editor {
-                    document: Document::new(image),
+                    document: Document::new(image.rgba),
                     texture: Preview::new(texture),
                     scale,
                     focus,
@@ -66,6 +77,7 @@ pub(super) fn open(
                     drag: None,
                     busy: false,
                     status: None,
+                    trace,
                 }
             })
         },
@@ -99,6 +111,7 @@ struct Editor {
     drag: Option<(ImagePoint<u32>, ImagePoint<u32>)>,
     busy: bool,
     status: Option<SharedString>,
+    trace: Option<CaptureTrace>,
 }
 
 impl Editor {
@@ -245,6 +258,9 @@ impl Editor {
                             ImageFormat::Png,
                             bytes,
                         )));
+                        if let Some(trace) = editor.trace {
+                            trace.record("editor_copy_completed");
+                        }
                         editor.status = Some("已复制标注后的截图".into());
                         cx.notify();
                     }
@@ -284,6 +300,9 @@ impl Editor {
                 editor.focus.focus(window);
                 match result {
                     Ok(saved) => {
+                        if saved && let Some(trace) = editor.trace {
+                            trace.record("editor_save_completed");
+                        }
                         editor.status = saved.then(|| "已保存标注后的截图".into());
                         cx.notify();
                     }

@@ -18,7 +18,11 @@ use crate::macos;
 
 mod editor;
 mod long_shot;
+mod platform;
 mod preview;
+mod trace;
+
+use trace::CaptureTrace;
 
 const BACKGROUND: u32 = 0x101823;
 const PANEL: u32 = 0x1e2c3b;
@@ -142,6 +146,7 @@ impl Launcher {
             cx.notify();
             return;
         };
+        let trace = CaptureTrace::start();
         if let Err(error) = MacOsCapture.ready() {
             self.status = format!("{error:#}").into();
             cx.notify();
@@ -156,12 +161,18 @@ impl Launcher {
 
         let task = cx.background_spawn(async move {
             let targets = MacOsCapture.targets(display_id.into());
-            MacOsCapture
-                .screen(display_id.into(), scale)
-                .map(|image| (image, targets))
+            let image = if let Some(trace) = trace {
+                MacOsCapture.screen_with_capture_callback(display_id.into(), scale, move || {
+                    trace.record("sck_returned");
+                })
+            } else {
+                MacOsCapture.screen(display_id.into(), scale)
+            }?;
+            Ok((image, targets))
         });
         cx.spawn(async move |launcher, cx| {
-            let captured = task.await.map_err(anyhow::Error::from);
+            let captured: Result<_, CaptureError> = task.await;
+            let captured = captured.map_err(anyhow::Error::from);
             let _ = launcher.update(cx, |launcher, cx| {
                 launcher.busy = false;
                 let result = captured.and_then(|(image, targets)| {
@@ -178,7 +189,7 @@ impl Launcher {
                         },
                         |window, cx| {
                             cx.new(|cx| {
-                                Selection::new(image, display_id, bounds.size, window, cx)
+                                Selection::new(image, display_id, bounds.size, trace, window, cx)
                                     .with_targets(targets)
                             })
                         },
@@ -388,6 +399,7 @@ struct Selection {
     selection: Option<Bounds<Pixels>>,
     work: SelectionWork,
     status: SharedString,
+    trace: Option<CaptureTrace>,
 }
 
 impl Selection {
@@ -395,11 +407,16 @@ impl Selection {
         image: RgbaImage,
         display_id: DisplayId,
         screen_size: Size<Pixels>,
+        trace: Option<CaptureTrace>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let focus = cx.focus_handle();
         focus.focus(window);
+        if let Some(trace) = trace {
+            trace.first_frame("overlay_first_frame", window);
+            trace.window_closed("overlay_closed", cx);
+        }
         Self {
             frame: Some(CaptureFrame {
                 texture: render_image(image.clone()),
@@ -416,6 +433,7 @@ impl Selection {
             selection: None,
             work: SelectionWork::Idle,
             status: "".into(),
+            trace,
         }
     }
 
@@ -446,6 +464,9 @@ impl Selection {
             size: view,
         });
         let region = crop_bounds(rect, view, &frame.image);
+        if let Some(trace) = self.trace {
+            trace.record("selection_confirmed");
+        }
         let Ok(cropped) = crop_selection(&frame.image, region) else {
             return;
         };
@@ -466,11 +487,14 @@ impl Selection {
             Output::Edit => {
                 let texture = Arc::ptr_eq(&cropped, &frame.image).then(|| frame.texture.clone());
                 if let Err(error) = editor::open(
-                    cropped,
-                    texture,
+                    editor::EditorImage {
+                        rgba: cropped,
+                        texture,
+                    },
                     self.scale,
                     self.display_id,
                     self.screen_size,
+                    self.trace,
                     || {
                         close_window(window);
                         self.frame.take();
@@ -488,6 +512,7 @@ impl Selection {
                     self.scale,
                     region,
                     frame.image.dimensions(),
+                    self.trace,
                 );
                 match shot.and_then(|shot| shot.open(rect, self.screen_size, cx)) {
                     Ok(()) => close_window(window),
@@ -515,6 +540,9 @@ impl Selection {
                     Ok(bytes) => {
                         let image = Image::from_bytes(ImageFormat::Png, bytes);
                         cx.write_to_clipboard(ClipboardItem::new_image(&image));
+                        if let Some(trace) = this.trace {
+                            trace.record("selection_copy_completed");
+                        }
                         close_window(window);
                     }
                     Err(error) => this.report(error.into(), cx),
@@ -550,7 +578,12 @@ impl Selection {
             let _ = this.update_in(cx, |this, window, cx| {
                 this.work = SelectionWork::Idle;
                 match result {
-                    Ok(true) => window.remove_window(),
+                    Ok(true) => {
+                        if let Some(trace) = this.trace {
+                            trace.record("selection_save_completed");
+                        }
+                        window.remove_window();
+                    }
                     Ok(false) => {
                         window.activate_window();
                         this.focus.focus(window);

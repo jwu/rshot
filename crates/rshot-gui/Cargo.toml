@@ -17,6 +17,7 @@ block2.workspace = true
 futures-channel.workspace = true
 gpui.workspace = true
 image = { workspace = true, features = ["jpeg", "tiff"] }
+mach2 = "0.5"
 objc2.workspace = true
 objc2-app-kit = { workspace = true, features = ["block2", "NSAlert", "NSApplication", "NSButton", "NSControl", "NSGraphics", "NSResponder", "NSTextField", "NSView", "NSWindow"] }
 objc2-core-foundation.workspace = true

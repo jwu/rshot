@@ -12,7 +12,7 @@ use rshot_core::{
 
 use super::{
     ACCENT, BACKGROUND, FOREGROUND, MUTED, button, hide_native_window, preview::Preview,
-    render_image,
+    render_image, trace::CaptureTrace,
 };
 
 pub(super) struct LongShot {
@@ -24,6 +24,7 @@ pub(super) struct LongShot {
     region: Rect<u32>,
     source_dimensions: (u32, u32),
     status: SharedString,
+    trace: Option<CaptureTrace>,
 }
 
 impl LongShot {
@@ -34,6 +35,7 @@ impl LongShot {
         scale: f32,
         region: Rect<u32>,
         source_dimensions: (u32, u32),
+        trace: Option<CaptureTrace>,
     ) -> Result<Self> {
         let stitcher = Stitcher::new(axis, first)?;
         Ok(Self {
@@ -45,6 +47,7 @@ impl LongShot {
             region,
             source_dimensions,
             status: "滚动原窗口，然后点击「添加一帧」。".into(),
+            trace,
         })
     }
 
@@ -79,7 +82,14 @@ impl LongShot {
                 is_minimizable: false,
                 ..Default::default()
             },
-            |_, cx| cx.new(|_| self),
+            |_, cx| {
+                cx.new(|cx| {
+                    if let Some(trace) = self.trace {
+                        trace.window_closed("long_shot_closed", cx);
+                    }
+                    self
+                })
+            },
         )?;
         Ok(())
     }
@@ -153,6 +163,9 @@ impl LongShot {
                             ImageFormat::Png,
                             bytes,
                         )));
+                        if let Some(trace) = this.trace {
+                            trace.record("long_shot_copy_completed");
+                        }
                         "已复制长截图。".into()
                     }
                     Err(error) => format!("{error:#}").into(),
@@ -193,7 +206,12 @@ impl LongShot {
             let _ = this.update_in(cx, |this, window, cx| {
                 this.stitcher = Some(stitcher);
                 this.status = match result {
-                    Ok(true) => "已保存长截图。".into(),
+                    Ok(true) => {
+                        if let Some(trace) = this.trace {
+                            trace.record("long_shot_save_completed");
+                        }
+                        "已保存长截图。".into()
+                    }
                     Ok(false) => "已取消保存，可以继续拼接。".into(),
                     Err(error) => format!("{error:#}").into(),
                 };

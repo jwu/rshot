@@ -107,18 +107,21 @@ impl MacOsCapture {
     /// Captures the entire window in isolation, including portions outside the display.
     pub fn capture_window(&self, window_id: u32) -> Result<CapturedImage, CaptureError> {
         let displays = self.capture_displays()?;
-        let (image, mut metadata) = capture_image(move |content| {
-            let (filter, metadata) = window_capture_plan(content, window_id, &displays)?;
-            let Size { width, height } = metadata.pixel_size;
-            let config = stream_config(width as usize, height as usize);
-            // These macOS 14 properties apply to desktop-independent window filters.
-            unsafe {
-                config.setIgnoreShadowsSingleWindow(true);
-                config.setIgnoreGlobalClipSingleWindow(true);
-                config.setShouldBeOpaque(true);
-            }
-            Ok((filter, config, metadata))
-        })?;
+        let (image, mut metadata) = capture_image(
+            || {},
+            move |content| {
+                let (filter, metadata) = window_capture_plan(content, window_id, &displays)?;
+                let Size { width, height } = metadata.pixel_size;
+                let config = stream_config(width as usize, height as usize);
+                // These macOS 14 properties apply to desktop-independent window filters.
+                unsafe {
+                    config.setIgnoreShadowsSingleWindow(true);
+                    config.setIgnoreGlobalClipSingleWindow(true);
+                    config.setShouldBeOpaque(true);
+                }
+                Ok((filter, config, metadata))
+            },
+        )?;
         let (width, height) = image.dimensions();
         metadata.pixel_size = Size { width, height };
         Ok(CapturedImage { image, metadata })
@@ -136,16 +139,19 @@ impl MacOsCapture {
         let Size { width, height } = display.pixel_size;
         let expected_size = display.bounds.size;
         let id = display.id;
-        let (frame, ()) = capture_image(move |content| {
-            let native_display = find_display(content, id)?;
-            // ScreenCaptureKit keeps the display alive through this configuration callback.
-            if logical_rect(unsafe { native_display.frame() }).size != expected_size {
-                return Err(CaptureError::DisplayResized);
-            }
-            let filter = display_filter(&native_display, &NSArray::new());
-            let config = stream_config(width as usize, height as usize);
-            Ok((filter, config, ()))
-        })?;
+        let (frame, ()) = capture_image(
+            || {},
+            move |content| {
+                let native_display = find_display(content, id)?;
+                // ScreenCaptureKit keeps the display alive through this configuration callback.
+                if logical_rect(unsafe { native_display.frame() }).size != expected_size {
+                    return Err(CaptureError::DisplayResized);
+                }
+                let filter = display_filter(&native_display, &NSArray::new());
+                let config = stream_config(width as usize, height as usize);
+                Ok((filter, config, ()))
+            },
+        )?;
         if frame.dimensions() != (width, height) {
             return Err(CaptureError::DisplayResized);
         }
@@ -192,7 +198,23 @@ impl CaptureBackend for MacOsCapture {
     }
 
     fn screen(&self, display_id: u32, scale: f32) -> Result<RgbaImage, CaptureError> {
-        capture_image(move |content| {
+        self.screen_with_capture_callback(display_id, scale, || {})
+    }
+
+    fn targets(&self, display_id: u32) -> CaptureTargets {
+        windows::capture_targets(display_id)
+    }
+}
+
+impl MacOsCapture {
+    /// Captures a display and invokes the callback when ScreenCaptureKit returns a native frame.
+    pub fn screen_with_capture_callback(
+        &self,
+        display_id: u32,
+        scale: f32,
+        on_capture: impl Fn() + Copy + Send + Sync + 'static,
+    ) -> Result<RgbaImage, CaptureError> {
+        capture_image(on_capture, move |content| {
             let display = find_display(content, display_id)?;
             // The display and applications come from the current shareable content snapshot.
             let (applications, width, height) = unsafe {
@@ -214,10 +236,6 @@ impl CaptureBackend for MacOsCapture {
             ))
         })
         .map(|(image, ())| image)
-    }
-
-    fn targets(&self, display_id: u32) -> CaptureTargets {
-        windows::capture_targets(display_id)
     }
 }
 
@@ -386,6 +404,7 @@ type PreparedCapture<T> = (
 );
 
 fn capture_image<T: Copy + Send + Sync + 'static>(
+    on_capture: impl Fn() + Copy + Send + Sync + 'static,
     prepare: impl Fn(&SCShareableContent) -> Result<PreparedCapture<T>, CaptureError>
     + Send
     + Sync
@@ -406,7 +425,10 @@ fn capture_image<T: Copy + Send + Sync + 'static>(
             let (image, error) = unsafe { (image.as_ref(), error.as_ref()) };
             let result = image
                 .ok_or_else(|| native_error(error, "截取屏幕失败", CaptureError::Screenshot))
-                .and_then(to_rgba)
+                .and_then(|image| {
+                    on_capture();
+                    to_rgba(image)
+                })
                 .map(|frame| (frame, metadata));
             let _ = send.send(result);
         });
