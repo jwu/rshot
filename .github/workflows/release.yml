@@ -1,0 +1,61 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up pinned Rust toolchain
+        run: rustc --version
+      - name: Install just
+        run: brew install just
+      - name: Package macOS arm64 release
+        run: just package "$GITHUB_REF_NAME"
+      - name: Publish GitHub release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          tag="$GITHUB_REF_NAME"
+          version="${tag#v}"
+          assets=(
+            "dist/rshot-cli-$version-aarch64-apple-darwin.tar.gz"
+            "dist/Rshot-$version-aarch64-apple-darwin.zip"
+            dist/SHA256SUMS
+          )
+          notes=$(mktemp)
+          trap 'rm -f -- "$notes"' EXIT
+
+          append_footer() {
+            printf '\n\n' >> "$notes"
+            cat .github/release-notes-footer.md >> "$notes"
+          }
+
+          if [[ -f CHANGELOG.md ]] && awk -v version="$version" '
+            /^##[[:space:]]+/ {
+              if (in_release) exit
+              heading = $2
+              sub(/^\[/, "", heading)
+              sub(/\].*$/, "", heading)
+              sub(/^v/, "", heading)
+              in_release = (heading == version)
+              next
+            }
+            in_release { print }
+          ' CHANGELOG.md > "$notes" && grep -q '[^[:space:]]' "$notes"; then
+            append_footer
+            gh release create "$tag" "${assets[@]}" --verify-tag --notes-file "$notes"
+          else
+            gh release create "$tag" "${assets[@]}" --verify-tag --draft --generate-notes
+            gh release view "$tag" --json body --jq .body > "$notes"
+            append_footer
+            gh release edit "$tag" --notes-file "$notes" --draft=false
+          fi

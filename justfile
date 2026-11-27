@@ -21,6 +21,9 @@ test:
 
 check: fmt-check lint test
 
+package tag="":
+    scripts/package-macos.sh {{quote(tag)}}
+
 hooks:
     cd {{quote(repository)}} && cog --config {{quote(justfile_directory() + "/cog.toml")}} install-hook commit-msg
 
