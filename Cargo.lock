@@ -4006,6 +4006,7 @@ dependencies = [
  "rshot-core",
  "serde",
  "serde_json",
+ "strsim",
 ]
 
 [[package]]

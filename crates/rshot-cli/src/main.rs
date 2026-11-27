@@ -8,7 +8,7 @@ mod output;
 #[cfg(target_os = "macos")]
 use {
     clap::{CommandFactory, Parser, Subcommand, error::ErrorKind},
-    commands::{annotate, capture, grid, windows, zoom},
+    commands::{annotate, capture, grid, locate, ocr, windows, zoom},
     error::{CliError, ExitStatus},
     output::{CommandOutput, emit},
     std::{ffi::OsString, io, process::ExitCode},
@@ -41,6 +41,10 @@ enum Command {
     Grid(grid::Args),
     /// Enlarge a region of an image.
     Zoom(zoom::Args),
+    /// Recognize text and report line coordinates in an image.
+    Ocr(ocr::Args),
+    /// Find the pixel coordinates of text in an image.
+    Locate(locate::Args),
 }
 
 #[cfg(target_os = "macos")]
@@ -54,6 +58,8 @@ fn main() -> ExitCode {
                 Command::Annotate(args) => ("annotate", annotate::run(args)),
                 Command::Grid(args) => ("grid", grid::run(args)),
                 Command::Zoom(args) => ("zoom", zoom::run(args)),
+                Command::Ocr(args) => ("ocr", ocr::run(args)),
+                Command::Locate(args) => ("locate", locate::run(args)),
             };
             (command.to_owned(), args.json, result)
         }

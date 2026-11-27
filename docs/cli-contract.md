@@ -30,6 +30,8 @@ Failures exit with a nonzero code. In JSON mode, stdout contains the error respo
 | `5` | Ambiguous target |
 | `6` | Target not found |
 
+`locate` includes the candidate matches as `error.matches` on an ambiguous query. See [OCR and text location](ocr.md) for its result fields and hints.
+
 ## Coordinates and artifacts
 
 Image space uses integer physical pixels and a top-left origin. Rectangles use `{"x":0,"y":0,"w":100,"h":80}`. Display space uses points and includes a `scale_factor` giving physical pixels per point.

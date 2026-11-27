@@ -8,6 +8,10 @@ use std::{
 };
 
 use image::{Rgba, RgbaImage};
+use rshot_core::{
+    annotation::{Spec, render},
+    geometry::Rect,
+};
 use serde_json::{Value, json};
 
 struct Fixture(PathBuf);
@@ -138,10 +142,39 @@ fn zoom_prints_the_default_output_path_in_text_mode() {
 }
 
 #[test]
-fn locate_commands_report_io_and_usage_errors() {
+fn image_commands_report_io_and_usage_errors() {
     let fixture = Fixture::new();
     for (args, code, kind) in [
         (&["--json", "grid", "missing.png"][..], 1, "io_error"),
+        (&["--json", "ocr", "missing.png"][..], 1, "io_error"),
+        (
+            &["--json", "locate", "missing.png", "Save"][..],
+            1,
+            "io_error",
+        ),
+        (
+            &["--json", "locate", "missing.png", "Save", "--nth", "0"][..],
+            2,
+            "invalid_usage",
+        ),
+        (
+            &[
+                "--json",
+                "locate",
+                "missing.png",
+                "Save",
+                "--nth",
+                "1",
+                "--all",
+            ][..],
+            2,
+            "invalid_usage",
+        ),
+        (
+            &["--json", "locate", "missing.png", ""][..],
+            2,
+            "invalid_usage",
+        ),
         (
             &["--json", "zoom", "missing.png", "--region", "0,0,10,10"][..],
             1,
@@ -206,4 +239,148 @@ fn locate_commands_report_io_and_usage_errors() {
         assert_eq!(response["error"]["kind"], kind);
     }
     assert!(!fixture.0.join("images/frame.v1.zoom.png").exists());
+}
+
+fn render_text(rows: &[(u32, u32, &str)]) -> RgbaImage {
+    let marks: Vec<_> = rows
+        .iter()
+        .map(|(x, y, text)| {
+            json!({"type":"text", "at":{"x":x,"y":y}, "text":text, "color":"#000", "size":42})
+        })
+        .collect();
+    let spec = Spec::from_json(&json!({"schema_version":1,"marks":marks}).to_string()).unwrap();
+    let white = RgbaImage::from_pixel(640, 360, Rgba([255; 4]));
+    render(&white, &spec).unwrap().image
+}
+
+fn ink_bounds(image: &RgbaImage, rows: std::ops::Range<u32>) -> Rect<u32> {
+    let pixels = image
+        .enumerate_pixels()
+        .filter(|(_, y, pixel)| rows.contains(y) && pixel[0] < 128);
+    let (left, top, right, bottom) = pixels.fold(
+        (image.width(), image.height(), 0, 0),
+        |(left, top, right, bottom), (x, y, _)| {
+            (left.min(x), top.min(y), right.max(x + 1), bottom.max(y + 1))
+        },
+    );
+    assert!(
+        right > left && bottom > top,
+        "No text was drawn in {rows:?}"
+    );
+    Rect::new(left, top, right - left, bottom - top)
+}
+
+fn assert_rect_near(actual: &Value, expected: Rect<u32>) {
+    let actual: Rect<u32> = serde_json::from_value(actual.clone()).unwrap();
+    const TOLERANCE: u32 = 9;
+    for (actual_edge, expected_edge) in [
+        (actual.origin.x, expected.origin.x),
+        (actual.origin.y, expected.origin.y),
+        (
+            actual.origin.x + actual.size.width,
+            expected.origin.x + expected.size.width,
+        ),
+        (
+            actual.origin.y + actual.size.height,
+            expected.origin.y + expected.size.height,
+        ),
+    ] {
+        assert!(
+            actual_edge.abs_diff(expected_edge) <= TOLERANCE,
+            "{actual:?} vs {expected:?}"
+        );
+    }
+}
+
+#[test]
+#[ignore = "requires the local macOS Vision text recognition models"]
+fn vision_recognizes_and_locates_english_and_chinese_text() {
+    let fixture = Fixture::new();
+    let image = render_text(&[
+        (48, 30, "Save Changes"),
+        (108, 136, "中文识别测试"),
+        (180, 242, "Save Draft"),
+    ]);
+    image.save(fixture.0.join("ocr.png")).unwrap();
+    let run = |args: &[&str], code| {
+        let output = fixture.run(args);
+        assert_eq!(output.status.code(), Some(code), "{output:?}");
+        assert!(output.stderr.is_empty(), "{output:?}");
+        let raw = String::from_utf8(output.stdout).unwrap();
+        println!("{args:?} -> {raw}");
+        serde_json::from_str::<Value>(&raw).unwrap()
+    };
+
+    let ocr = run(&["ocr", "ocr.png", "--json"], 0);
+    let explicit = run(
+        &[
+            "ocr", "ocr.png", "--lang", "zh-Hans", "--lang", "en", "--json",
+        ],
+        0,
+    );
+    let explicit_lines = explicit["lines"].as_array().unwrap();
+    assert_eq!(explicit_lines[1]["text"], "中文识别测试");
+    let lines = ocr["lines"].as_array().unwrap();
+    assert_eq!(lines.len(), 3);
+    for (index, (text, rows)) in [
+        ("Save Changes", 0..120),
+        ("中文识别测试", 120..220),
+        ("Save Draft", 220..360),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        assert_eq!(lines[index]["text"], text);
+        assert_rect_near(&lines[index]["rect"], ink_bounds(&image, rows));
+    }
+
+    let fast = run(&["ocr", "ocr.png", "--lang", "en", "--fast", "--json"], 0);
+    assert!(
+        fast["lines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|line| line["text"] == "Save Changes")
+    );
+
+    let chinese = run(&["locate", "ocr.png", "中文", "--json"], 0);
+    let chinese = &chinese["matches"][0];
+    assert_eq!(chinese["text"], "中文");
+    assert_eq!(chinese["estimated"], false);
+    assert_rect_near(
+        &chinese["rect"],
+        ink_bounds(&render_text(&[(108, 136, "中文")]), 120..220),
+    );
+
+    let ambiguous = run(&["locate", "ocr.png", "save", "--json"], 5);
+    assert_eq!(ambiguous["error"]["kind"], "ambiguous_target");
+    let all = run(&["locate", "ocr.png", "save", "--all", "--json"], 0);
+    assert_eq!(all["matches"], ambiguous["error"]["matches"]);
+    assert_eq!(all["matches"].as_array().unwrap().len(), 2);
+    for (index, (x, y)) in [(48, 30), (180, 242)].into_iter().enumerate() {
+        let found = &all["matches"][index];
+        assert_eq!(found["text"], "Save");
+        assert_eq!(found["estimated"], false);
+        assert_rect_near(
+            &found["rect"],
+            ink_bounds(&render_text(&[(x, y, "Save")]), y..y + 80),
+        );
+    }
+
+    let partial_word = run(&["locate", "ocr.png", "ave", "--nth", "1", "--json"], 0);
+    let partial: Rect<u32> =
+        serde_json::from_value(partial_word["matches"][0]["rect"].clone()).unwrap();
+    let word: Rect<u32> = serde_json::from_value(all["matches"][0]["rect"].clone()).unwrap();
+    assert!(partial.origin.x > word.origin.x && partial.size.width < word.size.width);
+
+    let nth = run(&["locate", "ocr.png", "save", "--nth", "2", "--json"], 0);
+    assert_eq!(nth["matches"], json!([all["matches"][1]]));
+    let missing = run(&["locate", "ocr.png", "saver", "--json"], 6);
+    assert_eq!(missing["error"]["kind"], "text_not_found");
+    assert!(
+        missing["error"]["hint"]
+            .as_str()
+            .unwrap()
+            .contains("Save Changes")
+    );
 }

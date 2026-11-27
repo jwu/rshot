@@ -1,4 +1,8 @@
-use rshot_core::{annotation::TextError, capture::CaptureError};
+use rshot_core::{
+    annotation::TextError,
+    capture::CaptureError,
+    ocr::{Match, OcrError, RecognitionLevel},
+};
 use serde::Serialize;
 
 #[repr(u8)]
@@ -7,7 +11,6 @@ pub enum ExitStatus {
     Usage = 2,
     Render = 3,
     Capture = 4,
-    #[allow(dead_code)]
     AmbiguousTarget = 5,
     TargetNotFound = 6,
 }
@@ -17,6 +20,8 @@ pub struct CliError {
     pub kind: &'static str,
     pub message: String,
     pub hint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    matches: Option<Vec<Match>>,
     #[serde(skip)]
     exit_code: u8,
 }
@@ -27,12 +32,18 @@ impl CliError {
             kind,
             message: message.into(),
             hint: None,
+            matches: None,
             exit_code: status as u8,
         }
     }
 
     pub fn with_hint(mut self, hint: impl Into<String>) -> Self {
         self.hint = Some(hint.into());
+        self
+    }
+
+    pub fn with_matches(mut self, matches: Vec<Match>) -> Self {
+        self.matches = Some(matches);
         self
     }
 
@@ -90,6 +101,26 @@ impl From<CaptureError> for CliError {
                 "The capture region is outside the bounds of the image or is empty.",
             ),
             _ => Self::new(ExitStatus::Capture, "capture_failed", error.to_string()),
+        }
+    }
+}
+
+impl From<OcrError> for CliError {
+    fn from(error: OcrError) -> Self {
+        let message = error.to_string();
+        match error {
+            OcrError::UnsupportedLanguage { level, .. } => {
+                let error = Self::new(ExitStatus::Usage, "unsupported_language", message);
+                match level {
+                    RecognitionLevel::Accurate => error,
+                    RecognitionLevel::Fast => error.with_hint("Retry without --fast."),
+                }
+            }
+            OcrError::EmptyImage => Self::new(ExitStatus::Usage, "invalid_image", message),
+            OcrError::UnsupportedPlatform => {
+                Self::new(ExitStatus::Capture, "unsupported_macos", message)
+            }
+            _ => Self::new(ExitStatus::Capture, "ocr_failed", message),
         }
     }
 }
