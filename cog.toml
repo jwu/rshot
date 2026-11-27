@@ -1,0 +1,15 @@
+tag_prefix = "v"
+ignore_merge_commits = true
+scopes = ["core", "cli", "gui", "deps", "ci", "docs", "release"]
+
+# Cocogitto's default bump commit uses the `version` scope.
+disable_bump_commit = true
+pre_bump_hooks = ["git add -- CHANGELOG.md && git commit -m 'chore(release): release {{version}}'"]
+
+[changelog]
+path = "CHANGELOG.md"
+
+[git_hooks.commit-msg]
+script = """#!/bin/sh
+exec cog verify --ignore-merge-commits --file "$1"
+"""
