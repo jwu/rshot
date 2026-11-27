@@ -16,6 +16,8 @@ pub enum CaptureError {
     DisplayEnumeration(String),
     #[error("找不到要截图的显示器")]
     DisplayNotFound,
+    #[error("Window {0} was not found")]
+    WindowNotFound(u32),
     #[error("{0}")]
     Screenshot(String),
     #[error("屏幕截图等待超时")]
@@ -65,11 +67,14 @@ pub struct WindowInfo {
 pub enum CaptureSource {
     Display,
     Region,
+    Window { window_id: u32 },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CaptureMetadata {
     pub source: CaptureSource,
+    /// The captured display, or the display with the largest visible portion of the window.
+    /// A window with no intersecting display has no display ID.
     pub display_id: Option<u32>,
     pub scale_factor: f64,
     /// Captured bounds in global points, with a top-left origin.

@@ -16,21 +16,29 @@ use crate::{
 
 type WindowDictionary = CFDictionary<CFString, CFType>;
 
-fn window_list(options: CGWindowListOption) -> Option<CFRetained<CFArray<WindowDictionary>>> {
-    let windows = CGWindowListCopyWindowInfo(options, 0)?;
+fn window_list(
+    options: CGWindowListOption,
+    relative_to: u32,
+) -> Option<CFRetained<CFArray<WindowDictionary>>> {
+    let windows = CGWindowListCopyWindowInfo(options, relative_to)?;
     // CoreGraphics documents the array's elements as dictionaries with CF values.
     Some(unsafe { CFRetained::cast_unchecked(windows) })
 }
 
+pub(super) fn exists(window_id: u32) -> bool {
+    window_list(CGWindowListOption::OptionIncludingWindow, window_id)
+        .is_some_and(|windows| !windows.is_empty())
+}
+
 pub(super) fn windows(include_all: bool) -> Vec<WindowInfo> {
-    let mut windows: Vec<_> = window_list(CGWindowListOption::OptionOnScreenOnly)
+    let mut windows: Vec<_> = window_list(CGWindowListOption::OptionOnScreenOnly, 0)
         .iter()
         .flat_map(|list| list.iter())
         .filter_map(|window| window_info(&window))
         .collect();
     let seen: HashSet<_> = windows.iter().map(|window| window.window_id).collect();
     windows.extend(
-        window_list(CGWindowListOption::OptionAll)
+        window_list(CGWindowListOption::OptionAll, 0)
             .iter()
             .flat_map(|list| list.iter())
             .filter_map(|window| window_info(&window))
@@ -91,6 +99,7 @@ fn window_info(window: &WindowDictionary) -> Option<WindowInfo> {
 pub(super) fn capture_targets(display_id: u32) -> CaptureTargets {
     let Some(windows) = window_list(
         CGWindowListOption::OptionOnScreenOnly | CGWindowListOption::ExcludeDesktopElements,
+        0,
     ) else {
         return CaptureTargets::default();
     };

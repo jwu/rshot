@@ -61,6 +61,45 @@ impl MacOsCapture {
         self.capture_display_area(display_id, Some(region))
     }
 
+    /// Captures the entire window in isolation, including portions outside the display.
+    pub fn capture_window(&self, window_id: u32) -> Result<CapturedImage, CaptureError> {
+        check_permission()?;
+        let displays = self.displays()?;
+        let (image, (bounds, scale_factor, display_id)) = capture_image(move |content| {
+            let (filter, bounds, scale_factor) = window_filter(content, window_id)?;
+            let width: u32 = ((bounds.size.width * scale_factor).round() as u64).try_into()?;
+            let height: u32 = ((bounds.size.height * scale_factor).round() as u64).try_into()?;
+            if width == 0 || height == 0 {
+                return Err(CaptureError::Screenshot(format!(
+                    "Window {window_id} has no capturable pixels"
+                )));
+            }
+            let config = stream_config(width as usize, height as usize);
+            // These macOS 14 properties apply to desktop-independent window filters.
+            unsafe {
+                config.setIgnoreShadowsSingleWindow(true);
+                config.setIgnoreGlobalClipSingleWindow(true);
+                config.setShouldBeOpaque(true);
+            }
+            Ok((
+                filter,
+                config,
+                (bounds, scale_factor, window_display(bounds, &displays)),
+            ))
+        })?;
+        let (width, height) = image.dimensions();
+        Ok(CapturedImage {
+            image,
+            metadata: CaptureMetadata {
+                source: CaptureSource::Window { window_id },
+                display_id,
+                scale_factor,
+                bounds,
+                pixel_size: Size { width, height },
+            },
+        })
+    }
+
     fn capture_display_area(
         &self,
         display_id: Option<u32>,
@@ -72,12 +111,12 @@ impl MacOsCapture {
             .map(|region| display_region(&display, region))
             .transpose()?;
         let Size { width, height } = display.pixel_size;
-        let expected_bounds = display.bounds;
+        let expected_size = display.bounds.size;
         let id = display.id;
         let (frame, ()) = capture_image(move |content| {
             let native_display = find_display(content, id)?;
             // ScreenCaptureKit keeps the display alive through this configuration callback.
-            if logical_rect(unsafe { native_display.frame() }) != expected_bounds {
+            if logical_rect(unsafe { native_display.frame() }).size != expected_size {
                 return Err(CaptureError::DisplayResized);
             }
             let filter = display_filter(&native_display, &NSArray::new());
@@ -256,6 +295,55 @@ fn display_filter(
     }
 }
 
+fn window_filter(
+    content: &SCShareableContent,
+    window_id: u32,
+) -> Result<(Retained<SCContentFilter>, Rect<f64>, f64), CaptureError> {
+    // The window comes from the current shareable content snapshot.
+    unsafe {
+        let window = content
+            .windows()
+            .iter()
+            .find(|window| window.windowID() == window_id)
+            .ok_or_else(|| {
+                if windows::exists(window_id) {
+                    CaptureError::Screenshot(format!(
+                        "Window {window_id} is unavailable for capture"
+                    ))
+                } else {
+                    CaptureError::WindowNotFound(window_id)
+                }
+            })?;
+        let filter =
+            SCContentFilter::initWithDesktopIndependentWindow(SCContentFilter::alloc(), &window);
+        let bounds = logical_rect(window.frame());
+        let scale = f64::from(filter.pointPixelScale());
+        Ok((filter, bounds, scale))
+    }
+}
+
+fn window_display(bounds: Rect<f64>, displays: &[DisplayInfo]) -> Option<u32> {
+    displays
+        .iter()
+        .filter_map(|display| {
+            let frame = display.bounds;
+            let left = bounds.origin.x.max(frame.origin.x);
+            let right =
+                (bounds.origin.x + bounds.size.width).min(frame.origin.x + frame.size.width);
+            let top = bounds.origin.y.max(frame.origin.y);
+            let bottom =
+                (bounds.origin.y + bounds.size.height).min(frame.origin.y + frame.size.height);
+            (right > left && bottom > top).then_some(((right - left) * (bottom - top), display))
+        })
+        .max_by(|(area_a, a), (area_b, b)| {
+            area_a
+                .total_cmp(area_b)
+                .then(a.is_primary.cmp(&b.is_primary))
+                .then(b.id.cmp(&a.id))
+        })
+        .map(|(_, display)| display.id)
+}
+
 fn stream_config(width: usize, height: usize) -> Retained<SCStreamConfiguration> {
     // The configuration is private to this capture request.
     unsafe {
@@ -284,7 +372,8 @@ fn capture_image<T: Copy + Send + Sync + 'static>(
         let completion = RcBlock::new(
             move |content: *mut SCShareableContent, error: *mut NSError| {
                 // The framework keeps both arguments alive for the duration of the callback.
-                let prepared = unsafe { content.as_ref() }
+                let (content, error) = unsafe { (content.as_ref(), error.as_ref()) };
+                let prepared = content
                     .ok_or_else(|| {
                         native_error(
                             error,
@@ -302,8 +391,9 @@ fn capture_image<T: Copy + Send + Sync + 'static>(
                 };
                 let send = send.clone();
                 let completion = RcBlock::new(move |image: *mut CGImage, error: *mut NSError| {
-                    // The CGImage stays alive until this callback returns.
-                    let result = unsafe { image.as_ref() }
+                    // The CGImage and error stay alive until this callback returns.
+                    let (image, error) = unsafe { (image.as_ref(), error.as_ref()) };
+                    let result = image
                         .ok_or_else(|| {
                             native_error(error, "截取屏幕失败", CaptureError::Screenshot)
                         })
@@ -330,14 +420,14 @@ fn capture_image<T: Copy + Send + Sync + 'static>(
 }
 
 fn native_error(
-    error: *mut NSError,
+    error: Option<&NSError>,
     fallback: &str,
     wrap: impl FnOnce(String) -> CaptureError,
 ) -> CaptureError {
-    // The error and domain constant are available for the duration of the callback.
-    let Some(error) = (unsafe { error.as_ref() }) else {
+    let Some(error) = error else {
         return wrap(fallback.to_owned());
     };
+    // ScreenCaptureKit provides this immutable domain constant.
     if &*error.domain() == unsafe { SCStreamErrorDomain }
         && matches!(
             SCStreamErrorCode(error.code()),
@@ -470,6 +560,52 @@ mod tests {
         assert_eq!(region.dimensions(), (3, 2));
         assert_eq!(region.get_pixel(0, 0).0, [1, 3, 0, 255]);
         assert_eq!(region.get_pixel(2, 1).0, [3, 4, 0, 255]);
+    }
+
+    #[test]
+    fn associates_a_cross_display_window_by_its_point_area() {
+        let retina = display(1, Rect::new(0., 0., 1440., 900.), 2, true);
+        let standard = display(2, Rect::new(-1600., -200., 1600., 1000.), 1, false);
+        let displays = [standard, retina];
+        assert_eq!(
+            window_display(Rect::new(-300., 20., 400., 600.), &displays),
+            Some(2)
+        );
+        assert_eq!(
+            window_display(Rect::new(-200., 20., 400., 600.), &displays),
+            Some(1)
+        );
+        assert_eq!(
+            window_display(Rect::new(1440., 20., 300., 400.), &displays),
+            None
+        );
+    }
+
+    #[test]
+    fn distinguishes_permission_errors_from_other_capture_failures() {
+        // Neither error needs a user-info dictionary, and both domains outlive the errors.
+        let (denied, failed) = unsafe {
+            (
+                NSError::errorWithDomain_code_userInfo(
+                    SCStreamErrorDomain,
+                    SCStreamErrorCode::UserDeclined.0,
+                    None,
+                ),
+                NSError::errorWithDomain_code_userInfo(
+                    SCStreamErrorDomain,
+                    SCStreamErrorCode::InternalError.0,
+                    None,
+                ),
+            )
+        };
+        assert!(matches!(
+            native_error(Some(&denied), "Capture failed", CaptureError::Screenshot),
+            CaptureError::PermissionDenied,
+        ));
+        assert!(matches!(
+            native_error(Some(&failed), "Capture failed", CaptureError::Screenshot),
+            CaptureError::Screenshot(_),
+        ));
     }
 
     #[test]
