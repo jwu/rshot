@@ -178,11 +178,11 @@ fn render_validates_specs_constructed_directly() {
 fn step_numbers_follow_the_highest_previous_number_and_labels_stay_in_the_legend() {
     let source = RgbaImage::new(175, 32);
     let marks = json!([
-        {"type":"step","at":{"x":2,"y":2},"label":"First action"},
-        {"type":"step","at":{"x":37,"y":2},"n":7},
-        {"type":"step","at":{"x":72,"y":2},"n":null},
-        {"type":"step","at":{"x":107,"y":2},"n":3},
-        {"type":"step","at":{"x":142,"y":2}}
+        {"type":"step","at":{"x":16,"y":16},"label":"First action"},
+        {"type":"step","at":{"x":51,"y":16},"n":7},
+        {"type":"step","at":{"x":86,"y":16},"n":null},
+        {"type":"step","at":{"x":121,"y":16},"n":3},
+        {"type":"step","at":{"x":156,"y":16}}
     ]);
     let rendered = render_marks(&source, marks.clone());
     assert_eq!(
@@ -228,7 +228,8 @@ fn a_small_step_stays_inside_its_badge_bounds() {
                 {"type":"step","at":{"x":5,"y":5},"n":7,"size":size}
             ]),
         );
-        assert_eq!(rendered.marks[0].bounds, Rect::new(5, 5, size, size));
+        let edge = 5 - size / 2;
+        assert_eq!(rendered.marks[0].bounds, Rect::new(edge, edge, size, size));
     }
 }
 
@@ -280,7 +281,8 @@ fn geometric_marks_match_the_golden_image() {
             {"type":"ellipse","rect":{"x":43,"y":26,"w":65,"h":45},"fill":"#276EF144"},
             {"type":"highlight","rect":{"x":15,"y":49,"w":82,"h":39}},
             {"type":"arrow","from":{"x":17,"y":68},"to":{"x":82,"y":17},"width":5},
-            {"type":"redact","rect":{"x":71,"y":77,"w":41,"h":10}}
+            {"type":"redact","rect":{"x":71,"y":77,"w":41,"h":10}},
+            {"type":"step","at":{"x":110,"y":34},"size":22,"color":"#FFFFFF00"}
         ]),
     );
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden/annotation.png");

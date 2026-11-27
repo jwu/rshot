@@ -96,17 +96,17 @@ pub fn render(image: &RgbaImage, spec: &Spec) -> Result<Rendered, AnnotateError>
                     i64::from(mark.at.y),
                     i64::from(mark.size),
                 );
-                let area = Rect::new(x, y, size, size);
+                let area = Rect::new(x - size / 2, y - size / 2, size, size);
                 let circle = Shape::Ellipse.path(area, 0);
                 canvas.mask(area, circle.as_ref(), FillRule::Winding, mark.fill, "size")?;
                 let visible = area.clip(image.dimensions()).size;
-                if visible.width != 0 && visible.height != 0 {
+                if mark.color.0[3] != 0 && visible.width != 0 && visible.height != 0 {
                     canvas.text(
                         &value,
                         (1.2 / value.len() as f64).min(0.54) * f64::from(mark.size),
                         mark.color,
                         None,
-                        TextAnchor::Center(Point::new(x + size / 2, y + size / 2)),
+                        TextAnchor::Center(Point::new(x, y)),
                     )?;
                 }
                 n = Some(number);
