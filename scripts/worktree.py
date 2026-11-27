@@ -110,9 +110,9 @@ def main():
     if command == "path":
         print(path)
     elif command == "remove":
-        status = git(path, "status", "--porcelain=v1", "--untracked-files=all", "--ignored=matching")
+        status = git(path, "status", "--porcelain=v1", "--untracked-files=all")
         if status:
-            raise WorktreeError(f"Worktree at {path} has changes or local files:\n{status}")
+            raise WorktreeError(f"Worktree at {path} has changes or untracked files:\n{status}")
         git(repo, "worktree", "remove", "--", path)
         print(f"Removed {path}. Kept branch {branch_name(entries[path])!r}.")
     elif command == "check":
