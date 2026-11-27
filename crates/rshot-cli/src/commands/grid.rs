@@ -1,6 +1,9 @@
 use std::path::{self, Path, PathBuf};
 
-use image::{ImageReader, RgbaImage};
+use image::{
+    ColorType, DynamicImage, ImageDecoder, ImageError, ImageReader, ImageResult, Limits, RgbaImage,
+    error::{ParameterError, ParameterErrorKind},
+};
 use rshot_core::{
     locate::{GridOptions, LocateWarning, Rendered, grid_owned},
     png,
@@ -48,10 +51,36 @@ pub fn run(args: Args) -> Result<CommandOutput, CliError> {
 }
 
 pub(super) fn open_image(path: &Path) -> Result<RgbaImage, CliError> {
-    Ok(ImageReader::open(path)?
+    let decoder = ImageReader::open(path)?
         .with_guessed_format()?
-        .decode()?
-        .into_rgba8())
+        .into_decoder()?;
+    Ok(decode_rgba(decoder)?)
+}
+
+fn decode_rgba(mut decoder: impl ImageDecoder) -> ImageResult<RgbaImage> {
+    let mut limits = Limits::default();
+    let decoded_len = decoder.total_bytes();
+    limits.reserve(decoded_len)?;
+    decoder.set_limits(limits)?;
+    if decoder.color_type() != ColorType::Rgb8 {
+        return Ok(DynamicImage::from_decoder(decoder)?.into_rgba8());
+    }
+
+    let (width, height) = decoder.dimensions();
+    let decoded_len = decoded_len as usize;
+    let count = decoded_len / 3;
+    let mut pixels = vec![0; count * 4];
+    decoder.read_image(&mut pixels[..decoded_len])?;
+    for i in (0..count).rev() {
+        let src = i * 3;
+        let rgba = [pixels[src], pixels[src + 1], pixels[src + 2], 255];
+        pixels[i * 4..i * 4 + 4].copy_from_slice(&rgba);
+    }
+    RgbaImage::from_raw(width, height, pixels).ok_or_else(|| {
+        ImageError::Parameter(ParameterError::from_kind(
+            ParameterErrorKind::DimensionMismatch,
+        ))
+    })
 }
 
 pub(super) fn save_rendered<M>(
@@ -102,4 +131,42 @@ pub(super) fn save_rendered<M>(
     }
     png::save(&rendered.image, artifact.path())?;
     Ok(output)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Cursor;
+
+    use image::{
+        ImageEncoder,
+        codecs::png::{PngDecoder, PngEncoder},
+    };
+
+    use super::*;
+
+    #[test]
+    fn decode_rgba_matches_image_reader_for_rgb_and_rgba_pngs() {
+        for (color, pixels) in [
+            (
+                ColorType::Rgb8,
+                &[25, 50, 75, 18, 36, 75, 9, 200, 234, 255, 70, 90][..],
+            ),
+            (
+                ColorType::Rgba8,
+                &[
+                    7, 14, 21, 28, 35, 42, 49, 0, 63, 70, 77, 84, 91, 98, 105, 255,
+                ][..],
+            ),
+            (ColorType::La8, &[25, 50, 75, 18, 36, 75, 9, 200][..]),
+        ] {
+            let mut png = Vec::new();
+            PngEncoder::new(&mut png)
+                .write_image(pixels, 2, 2, color.into())
+                .unwrap();
+            let old = image::load_from_memory(&png).unwrap().into_rgba8();
+            let new = decode_rgba(PngDecoder::new(Cursor::new(&png)).unwrap()).unwrap();
+            assert_eq!(new, old);
+            assert_eq!(new.color_space(), old.color_space());
+        }
+    }
 }
