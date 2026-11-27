@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use anyhow::{Context as _, Result, anyhow};
 use gpui::*;
 use image::RgbaImage;
@@ -10,11 +8,14 @@ use rshot_core::{
     stitch::{Axis, Progress, Stitcher},
 };
 
-use super::{ACCENT, BACKGROUND, FOREGROUND, MUTED, button, hide_native_window, render_image};
+use super::{
+    ACCENT, BACKGROUND, FOREGROUND, MUTED, button, hide_native_window, preview::Preview,
+    render_image,
+};
 
 pub(super) struct LongShot {
     stitcher: Option<Stitcher>,
-    preview: Arc<RenderImage>,
+    preview: Preview,
     dimensions: (u32, u32),
     display: DisplayId,
     scale: f32,
@@ -34,7 +35,7 @@ impl LongShot {
     ) -> Result<Self> {
         let stitcher = Stitcher::new(axis, first)?;
         Ok(Self {
-            preview: render_image(stitcher.preview(680)),
+            preview: Preview::new(render_image(stitcher.preview(680))),
             dimensions: stitcher.dimensions(),
             stitcher: Some(stitcher),
             display,
@@ -111,7 +112,7 @@ impl LongShot {
                 this.status = match result {
                     Ok((progress, preview)) => {
                         if let Some(preview) = preview {
-                            this.preview = preview;
+                            this.preview.replace(preview);
                         }
                         match progress {
                             Progress::Extended => "已拼接。继续滚动或导出。".into(),
@@ -226,10 +227,10 @@ impl Render for LongShot {
                     .min_h(px(0.))
                     .overflow_hidden()
                     .child(
-                        img(self.preview.clone())
+                        self.preview
+                            .element(ObjectFit::Contain)
                             .absolute()
-                            .size_full()
-                            .object_fit(ObjectFit::Contain),
+                            .size_full(),
                     ),
             )
             .child(div().text_sm().min_h(px(38.)).child(super::ui_label(

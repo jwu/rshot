@@ -18,6 +18,7 @@ use crate::macos;
 
 mod editor;
 mod long_shot;
+mod preview;
 
 const BACKGROUND: u32 = 0x101823;
 const PANEL: u32 = 0x1e2c3b;

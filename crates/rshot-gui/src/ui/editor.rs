@@ -16,7 +16,8 @@ use rshot_core::{
 };
 
 use super::{
-    BACKGROUND, FOREGROUND, MUTED, PANEL, button, close_window, place, render_image, selection_rect,
+    BACKGROUND, FOREGROUND, MUTED, PANEL, button, close_window, place, preview::Preview,
+    render_image, selection_rect,
 };
 
 const TOOLBAR: f32 = 58.;
@@ -55,7 +56,7 @@ pub(super) fn open(
                 let texture = render_image(image.clone());
                 Editor {
                     document: Document::new(image),
-                    texture,
+                    texture: Preview::new(texture),
                     scale,
                     focus,
                     tool: Tool::Arrow,
@@ -88,7 +89,7 @@ impl Tool {
 
 struct Editor {
     document: Document,
-    texture: Arc<RenderImage>,
+    texture: Preview,
     scale: f32,
     focus: FocusHandle,
     tool: Tool,
@@ -99,7 +100,8 @@ struct Editor {
 
 impl Editor {
     fn redraw(&mut self, cx: &mut Context<Self>) {
-        self.texture = render_image((**self.document.result()).clone());
+        self.texture
+            .replace(render_image((**self.document.result()).clone()));
         self.status = None;
         cx.notify();
     }
@@ -376,11 +378,9 @@ impl Render for Editor {
             .bg(rgb(BACKGROUND))
             .text_color(rgb(FOREGROUND))
             .child(
-                place(bounds).cursor_crosshair().child(
-                    img(self.texture.clone())
-                        .size_full()
-                        .object_fit(ObjectFit::Fill),
-                ),
+                place(bounds)
+                    .cursor_crosshair()
+                    .child(self.texture.element(ObjectFit::Fill).size_full()),
             )
             .on_mouse_down(
                 MouseButton::Left,
