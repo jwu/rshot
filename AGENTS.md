@@ -4,8 +4,9 @@
 
 - The lead agent communicates with the user, clarifies requirements, designs the approach, delegates work, reviews changes, and delivers the result. Delegate all work that can be delegated and keep user communication responsive while subagents work.
 - Use `hc_subagent` to delegate implementation to a `coder` or `worker` and read-only investigation to a `scout`.
-- Do each task in its own worktree at `~/worktrees/<project-name>/<task-name>`, using the task name as the branch name. For example, run `just wt-new feat/capture` from `main`.
-- The lead reviews the changes and confirms `just check` passes before merging. After the merge, remove the task worktree with `just wt-rm feat/capture` from another worktree.
+- Create a worktree for each task with `just wt new feat/capture` (requires Python 3.9 or newer). It starts from `main` by default and checks out `feat/capture` at `~/worktrees/rshot/feat-capture`. Branch slashes become hyphens in worktree directory names.
+- Use `just wt list` to find worktrees and `just wt path feat-capture` to print the absolute path.
+- The lead reviews the changes and confirms `just check` passes before merging. Run `just wt check feat-capture` from another worktree to check the task. After the merge, use `just wt remove feat-capture` to remove the clean worktree and retain the branch. Move or clear any local files, including ignored files such as `target/`, before removal.
 
 ## Commits and releases
 

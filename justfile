@@ -1,5 +1,7 @@
 repository := `dirname "$(git rev-parse --path-format=absolute --git-common-dir)"`
-project := file_name(repository)
+
+# Create, inspect, check, and remove worktrees.
+mod wt "just/wt"
 
 # List available recipes.
 default:
@@ -25,16 +27,6 @@ hooks:
 # Commit staged changes using a Conventional Commit type, subject, and optional scope.
 commit type subject scope="":
     cog commit -- {{quote(type)}} {{quote(subject)}} {{if scope == "" { "" } else { quote(scope) }}}
-
-# Create a worktree and a branch with the given name.
-wt-new name:
-    git check-ref-format {{quote("refs/heads/" + name)}}
-    git worktree add -b {{quote(name)}} "$HOME/worktrees/"{{quote(project + "/" + name)}}
-
-# Remove a clean worktree by branch name.
-wt-rm name:
-    git check-ref-format {{quote("refs/heads/" + name)}}
-    git worktree remove "$HOME/worktrees/"{{quote(project + "/" + name)}}
 
 [positional-arguments]
 changelog *args:
