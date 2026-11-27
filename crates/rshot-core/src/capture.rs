@@ -1,0 +1,84 @@
+use image::RgbaImage;
+use thiserror::Error;
+
+use crate::geometry::{Point, Rect, Size};
+
+#[cfg(target_os = "macos")]
+pub use crate::platform::macos::capture::MacOsCapture;
+
+#[derive(Debug, Error)]
+pub enum CaptureError {
+    #[error("区域截图需要 macOS 14 或更新版本")]
+    UnsupportedMacOs,
+    #[error("请在「系统设置 → 隐私与安全性 → 屏幕与系统音频录制」中授权，再重新打开 Rshot")]
+    PermissionDenied,
+    #[error("{0}")]
+    DisplayEnumeration(String),
+    #[error("找不到要截图的显示器")]
+    DisplayNotFound,
+    #[error("{0}")]
+    Screenshot(String),
+    #[error("屏幕截图等待超时")]
+    Timeout(#[source] std::sync::mpsc::RecvTimeoutError),
+    #[error("截图过宽")]
+    RowTooWide,
+    #[error("截图尺寸过大")]
+    ImageTooLarge,
+    #[error("无法建立 sRGB 色彩空间")]
+    ColorSpace,
+    #[error("无法分配截图缓冲区")]
+    BitmapContext,
+    #[error(transparent)]
+    DimensionOverflow(#[from] std::num::TryFromIntError),
+    #[error("截图缓冲区尺寸不匹配")]
+    BufferSize,
+    #[error("显示器尺寸发生变化，请重新选区")]
+    DisplayResized,
+    #[error("截图选区超出范围")]
+    RegionOutOfBounds,
+}
+
+/// Display-local bounds in logical coordinates, with windows ordered front to back.
+#[derive(Default)]
+pub struct CaptureTargets {
+    pub menu_bar: Option<Rect<f64>>,
+    pub windows: Vec<Rect<f64>>,
+}
+
+pub trait CaptureBackend {
+    /// Checks platform support and requests capture permission if needed.
+    fn ready(&self) -> Result<(), CaptureError>;
+
+    /// Captures a display at the requested pixel scale, blocking until a frame is available.
+    fn screen(&self, display_id: u32, scale: f32) -> Result<RgbaImage, CaptureError>;
+
+    fn targets(&self, display_id: u32) -> CaptureTargets;
+
+    fn region(
+        &self,
+        display_id: u32,
+        scale: f32,
+        expected_dimensions: (u32, u32),
+        region: Rect<u32>,
+    ) -> Result<RgbaImage, CaptureError> {
+        let frame = self.screen(display_id, scale)?;
+        if frame.dimensions() != expected_dimensions {
+            return Err(CaptureError::DisplayResized);
+        }
+        crop(&frame, region)
+    }
+}
+
+/// Crops a nonempty rectangle in image pixels with a top-left origin.
+pub fn crop(frame: &RgbaImage, region: Rect<u32>) -> Result<RgbaImage, CaptureError> {
+    let Point { x, y } = region.origin;
+    let Size { width, height } = region.size;
+    if width == 0
+        || height == 0
+        || x.saturating_add(width) > frame.width()
+        || y.saturating_add(height) > frame.height()
+    {
+        return Err(CaptureError::RegionOutOfBounds);
+    }
+    Ok(image::imageops::crop_imm(frame, x, y, width, height).to_image())
+}

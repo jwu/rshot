@@ -29,7 +29,7 @@
 
 ## Project layout
 
-The project is migrating from a single crate to this target workspace layout.
+The Cargo workspace contains these crates.
 
 - `crates/rshot-core` handles screenshot capture, annotation models, and rendering.
 - `crates/rshot-cli` serves AI agents. It produces PNG images and JSON metadata, keeps standard output machine-readable, sends diagnostics to standard error, and exits with a nonzero status on failure.

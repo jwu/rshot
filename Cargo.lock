@@ -3869,7 +3869,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6c20b6793b5c2fa6553b250154b78d6d0db37e72700ae35fad9387a46f487c97"
 
 [[package]]
-name = "rshot"
+name = "rshot-core"
+version = "0.1.0"
+dependencies = [
+ "block2",
+ "image",
+ "objc2",
+ "objc2-app-kit",
+ "objc2-core-foundation",
+ "objc2-core-graphics",
+ "objc2-foundation",
+ "objc2-screen-capture-kit",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "rshot-gui"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -3882,8 +3897,8 @@ dependencies = [
  "objc2-core-foundation",
  "objc2-core-graphics",
  "objc2-foundation",
- "objc2-screen-capture-kit",
  "raw-window-handle",
+ "rshot-core",
 ]
 
 [[package]]

@@ -1,12 +1,16 @@
-use super::{
-    ACCENT, BACKGROUND, FOREGROUND, MUTED, button, capture, hide_native_window, png_bytes,
-    render_image,
-};
-use crate::stitch::{Axis, Progress, Stitcher};
+use std::sync::Arc;
+
 use anyhow::{Context as _, Result, anyhow};
 use gpui::*;
 use image::RgbaImage;
-use std::sync::Arc;
+use rshot_core::{
+    capture::{CaptureBackend, MacOsCapture},
+    geometry::Rect,
+    png,
+    stitch::{Axis, Progress, Stitcher},
+};
+
+use super::{ACCENT, BACKGROUND, FOREGROUND, MUTED, button, hide_native_window, render_image};
 
 pub(super) struct LongShot {
     stitcher: Option<Stitcher>,
@@ -14,7 +18,7 @@ pub(super) struct LongShot {
     dimensions: (u32, u32),
     display: DisplayId,
     scale: f32,
-    region: [u32; 4],
+    region: Rect<u32>,
     source_dimensions: (u32, u32),
     status: SharedString,
 }
@@ -25,7 +29,7 @@ impl LongShot {
         first: RgbaImage,
         display: DisplayId,
         scale: f32,
-        region: [u32; 4],
+        region: Rect<u32>,
         source_dimensions: (u32, u32),
     ) -> Result<Self> {
         let stitcher = Stitcher::new(axis, first)?;
@@ -91,7 +95,7 @@ impl LongShot {
         cx.notify();
         let task = cx.background_spawn(async move {
             let result = (|| -> Result<_> {
-                let frame = capture::region(display.into(), scale, dimensions, region)?;
+                let frame = MacOsCapture.region(display.into(), scale, dimensions, region)?;
                 let progress = stitcher.push(frame)?;
                 let preview =
                     (progress == Progress::Extended).then(|| render_image(stitcher.preview(680)));
@@ -133,7 +137,7 @@ impl LongShot {
         self.status = "正在生成 PNG…".into();
         cx.notify();
         let task = cx.background_spawn(async move {
-            let result = png_bytes(&stitcher.image());
+            let result = png::encode(&stitcher.image()).map_err(anyhow::Error::from);
             (stitcher, result)
         });
         cx.spawn_in(window, async move |this, cx| {
@@ -172,9 +176,7 @@ impl LongShot {
             let (stitcher, result) = match dialog.await {
                 Ok(Ok(Some(path))) => {
                     cx.background_spawn(async move {
-                        let result = stitcher
-                            .image()
-                            .save_with_format(&path, image::ImageFormat::Png)
+                        let result = png::save(&stitcher.image(), &path)
                             .with_context(|| format!("无法保存 PNG 到 {}", path.display()))
                             .map(|()| true);
                         (stitcher, result)

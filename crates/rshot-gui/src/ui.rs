@@ -2,11 +2,19 @@ use std::{cell::RefCell, collections::HashMap, path::Path, sync::Arc};
 
 use anyhow::{Context as _, Result, anyhow, ensure};
 use gpui::{prelude::FluentBuilder, *};
-use image::{Frame, ImageEncoder, RgbaImage, codecs::png::PngEncoder, imageops::crop_imm};
+use image::{Frame, RgbaImage};
 use objc2::{msg_send, runtime::AnyObject};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
-use crate::{capture, macos, stitch::Axis};
+use rshot_core::{
+    annotation,
+    capture::{CaptureBackend, CaptureTargets, MacOsCapture, crop},
+    geometry::Rect,
+    png,
+    stitch::Axis,
+};
+
+use crate::macos;
 
 mod editor;
 mod long_shot;
@@ -62,12 +70,8 @@ fn ui_label(text: impl Into<SharedString>, color: u32, size: u32, max_width: u32
         if let Some(texture) = cache.get(&key) {
             return Ok(texture.clone());
         }
-        let image = crate::annotation::interface_text(
-            &text,
-            f64::from(size * SCALE),
-            max_width * SCALE,
-            color,
-        )?;
+        let image =
+            annotation::interface_text(&text, f64::from(size * SCALE), max_width * SCALE, color)?;
         let texture = render_image(image);
         if cache.len() >= 128 {
             cache.clear();
@@ -137,7 +141,7 @@ impl Launcher {
             cx.notify();
             return;
         };
-        if let Err(error) = capture::ready() {
+        if let Err(error) = MacOsCapture.ready() {
             self.status = format!("{error:#}").into();
             cx.notify();
             return;
@@ -150,11 +154,13 @@ impl Launcher {
         cx.notify();
 
         let task = cx.background_spawn(async move {
-            let targets = macos::capture_targets(display_id.into());
-            capture::screen(display_id.into(), scale).map(|image| (image, targets))
+            let targets = MacOsCapture.targets(display_id.into());
+            MacOsCapture
+                .screen(display_id.into(), scale)
+                .map(|image| (image, targets))
         });
         cx.spawn(async move |launcher, cx| {
-            let captured = task.await;
+            let captured = task.await.map_err(anyhow::Error::from);
             let _ = launcher.update(cx, |launcher, cx| {
                 launcher.busy = false;
                 let result = captured.and_then(|(image, targets)| {
@@ -294,18 +300,7 @@ fn render_image(mut image: RgbaImage) -> Arc<RenderImage> {
     Arc::new(RenderImage::new([Frame::new(image)]))
 }
 
-pub(crate) fn png_bytes(image: &RgbaImage) -> Result<Vec<u8>> {
-    let mut png = Vec::new();
-    PngEncoder::new(&mut png).write_image(
-        image.as_raw(),
-        image.width(),
-        image.height(),
-        image::ExtendedColorType::Rgba8,
-    )?;
-    Ok(png)
-}
-
-fn crop_bounds(rect: Bounds<Pixels>, viewport: Size<Pixels>, image: &RgbaImage) -> [u32; 4] {
+fn crop_bounds(rect: Bounds<Pixels>, viewport: Size<Pixels>, image: &RgbaImage) -> Rect<u32> {
     let sx = image.width() as f32 / f32::from(viewport.width);
     let sy = image.height() as f32 / f32::from(viewport.height);
     let right = rect.origin.x + rect.size.width;
@@ -316,7 +311,7 @@ fn crop_bounds(rect: Bounds<Pixels>, viewport: Size<Pixels>, image: &RgbaImage) 
     let y1 = ((f32::from(bottom) * sy).ceil() as u32).min(image.height());
     let x0 = x0.min(x1);
     let y0 = y0.min(y1);
-    [x0, y0, x1 - x0, y1 - y0]
+    Rect::new(x0, y0, x1 - x0, y1 - y0)
 }
 
 fn selection_rect(a: Point<Pixels>, b: Point<Pixels>, view: Size<Pixels>) -> Bounds<Pixels> {
@@ -398,8 +393,8 @@ impl Selection {
         }
     }
 
-    fn with_targets(mut self, targets: macos::CaptureTargets) -> Self {
-        let convert = |rect: objc2_core_foundation::CGRect| Bounds {
+    fn with_targets(mut self, targets: CaptureTargets) -> Self {
+        let convert = |rect: Rect<f64>| Bounds {
             origin: point(px(rect.origin.x as f32), px(rect.origin.y as f32)),
             size: size(px(rect.size.width as f32), px(rect.size.height as f32)),
         };
@@ -421,19 +416,18 @@ impl Selection {
             origin: point(px(0.), px(0.)),
             size: view,
         });
-        let [x, y, width, height] = crop_bounds(rect, view, &self.image);
-        if width == 0 || height == 0 {
+        let region = crop_bounds(rect, view, &self.image);
+        let Ok(cropped) = crop(&self.image, region) else {
             return;
-        }
-        let cropped = crop_imm(&self.image, x, y, width, height).to_image();
+        };
         match output {
-            Output::Copy => match png_bytes(&cropped) {
+            Output::Copy => match png::encode(&cropped) {
                 Ok(bytes) => {
                     let image = Image::from_bytes(ImageFormat::Png, bytes);
                     cx.write_to_clipboard(ClipboardItem::new_image(&image));
                     close_window(window);
                 }
-                Err(error) => self.report(error, cx),
+                Err(error) => self.report(error.into(), cx),
             },
             Output::Pin => match open_pin(
                 PinContent::Image(cropped),
@@ -459,7 +453,7 @@ impl Selection {
                     cropped,
                     self.display_id,
                     self.scale,
-                    [x, y, width, height],
+                    region,
                     self.image.dimensions(),
                 );
                 match shot.and_then(|shot| shot.open(rect, self.screen_size, cx)) {
@@ -489,8 +483,7 @@ impl Selection {
             let result = match dialog.await {
                 Ok(Ok(Some(path))) => {
                     let task = cx.background_spawn(async move {
-                        image
-                            .save_with_format(&path, image::ImageFormat::Png)
+                        png::save(&image, &path)
                             .with_context(|| format!("无法保存 PNG 到 {}", path.display()))
                     });
                     task.await.map(|()| true)
@@ -656,8 +649,8 @@ impl Render for Selection {
         }
 
         let label: SharedString = if let Some(rect) = rect {
-            let [_, _, w, h] = crop_bounds(rect, view, &self.image);
-            format!("{w} × {h} px").into()
+            let region = crop_bounds(rect, view, &self.image);
+            format!("{} × {} px", region.size.width, region.size.height).into()
         } else {
             "点击选取窗口或拖动框选 · Esc 退出".into()
         };
@@ -869,7 +862,7 @@ mod tests {
     use gpui::{Bounds, point, px, size};
     use image::RgbaImage;
 
-    use super::{capture_target_at, crop_bounds, png_bytes, selection_rect};
+    use super::{Rect, capture_target_at, crop_bounds, selection_rect};
 
     #[test]
     fn capture_prefers_menu_and_frontmost_window_then_falls_back_to_full_screen() {
@@ -905,7 +898,7 @@ mod tests {
         );
         assert_eq!(
             crop_bounds(menu, view, &RgbaImage::new(200, 160)),
-            [0, 0, 200, 10]
+            Rect::new(0, 0, 200, 10)
         );
     }
 
@@ -915,18 +908,7 @@ mod tests {
         let rect = selection_rect(point(px(125.), px(90.)), point(px(4.25), px(7.25)), view);
         assert_eq!(
             crop_bounds(rect, view, &RgbaImage::new(200, 160)),
-            [8, 14, 192, 146]
-        );
-    }
-
-    #[test]
-    fn png_preserves_color_and_alpha() {
-        let image = RgbaImage::from_raw(1, 1, vec![250, 22, 100, 127]).unwrap();
-        assert_eq!(
-            image::load_from_memory(&png_bytes(&image).unwrap())
-                .unwrap()
-                .to_rgba8(),
-            image
+            Rect::new(8, 14, 192, 146)
         );
     }
 }

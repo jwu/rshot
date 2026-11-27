@@ -9,12 +9,15 @@ use objc2::{MainThreadMarker, MainThreadOnly, msg_send, rc::Retained};
 use objc2_app_kit::{NSAlert, NSAlertFirstButtonReturn, NSTextField, NSWindow};
 use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+use rshot_core::{
+    annotation::{self, Document, Mark},
+    geometry::Point as ImagePoint,
+    png,
+};
 
 use super::{
-    BACKGROUND, FOREGROUND, MUTED, PANEL, button, close_window, place, png_bytes, render_image,
-    selection_rect,
+    BACKGROUND, FOREGROUND, MUTED, PANEL, button, close_window, place, render_image, selection_rect,
 };
-use crate::annotation::{self, Document, Mark};
 
 const TOOLBAR: f32 = 58.;
 const FOOTER: f32 = 38.;
@@ -89,7 +92,7 @@ struct Editor {
     scale: f32,
     focus: FocusHandle,
     tool: Tool,
-    drag: Option<(annotation::Point, annotation::Point)>,
+    drag: Option<(ImagePoint<u32>, ImagePoint<u32>)>,
     busy: bool,
     status: Option<SharedString>,
 }
@@ -163,7 +166,7 @@ impl Editor {
                 end,
                 stroke: f64::from(self.scale) * 3.5,
             }),
-            Tool::Mosaic if start.0 != end.0 && start.1 != end.1 => Some(Mark::Mosaic {
+            Tool::Mosaic if start.x != end.x && start.y != end.y => Some(Mark::Mosaic {
                 start,
                 end,
                 block: (self.scale * 12.).round() as u32,
@@ -178,12 +181,7 @@ impl Editor {
         }
     }
 
-    fn add_text(
-        &mut self,
-        position: annotation::Point,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn add_text(&mut self, position: ImagePoint<u32>, window: &mut Window, cx: &mut Context<Self>) {
         let parent = match text_sheet_parent(window) {
             Ok(parent) => parent,
             Err(error) => {
@@ -208,7 +206,7 @@ impl Editor {
                             editor.document.add(Mark::Text { position, label });
                             editor.redraw(cx);
                         }
-                        Err(error) => editor.report(error, cx),
+                        Err(error) => editor.report(error.into(), cx),
                     },
                     Ok(None) => cx.notify(),
                     Err(error) => editor.report(error, cx),
@@ -231,7 +229,7 @@ impl Editor {
         self.status = Some("正在生成 PNG…".into());
         cx.notify();
         let image = Arc::clone(self.document.result());
-        let task = cx.background_spawn(async move { png_bytes(&image) });
+        let task = cx.background_spawn(async move { png::encode(&image) });
         cx.spawn_in(window, async move |editor, cx| {
             let result = task.await;
             let _ = editor.update_in(cx, |editor, _, cx| {
@@ -245,7 +243,7 @@ impl Editor {
                         editor.status = Some("已复制标注后的截图".into());
                         cx.notify();
                     }
-                    Err(error) => editor.report(error, cx),
+                    Err(error) => editor.report(error.into(), cx),
                 }
             });
         })
@@ -266,8 +264,7 @@ impl Editor {
             let result = match dialog.await {
                 Ok(Ok(Some(path))) => {
                     cx.background_spawn(async move {
-                        image
-                            .save_with_format(&path, image::ImageFormat::Png)
+                        png::save(&image, &path)
                             .with_context(|| format!("无法保存 PNG 到 {}", path.display()))
                             .map(|()| true)
                     })
@@ -311,10 +308,10 @@ fn image_point(
     at: Point<Pixels>,
     bounds: Bounds<Pixels>,
     (width, height): (u32, u32),
-) -> annotation::Point {
+) -> ImagePoint<u32> {
     let x = f32::from(at.x - bounds.origin.x) * width as f32 / f32::from(bounds.size.width);
     let y = f32::from(at.y - bounds.origin.y) * height as f32 / f32::from(bounds.size.height);
-    (
+    ImagePoint::new(
         (x.floor() as u32).min(width - 1),
         (y.floor() as u32).min(height - 1),
     )
@@ -425,7 +422,7 @@ impl Render for Editor {
             }));
 
         if let Some((start, end)) = self.drag {
-            let to_canvas = |(x, y): annotation::Point| {
+            let to_canvas = |ImagePoint { x, y }: ImagePoint<u32>| {
                 point(
                     bounds.origin.x + bounds.size.width * ((x as f32 + 0.5) / image.0 as f32),
                     bounds.origin.y + bounds.size.height * ((y as f32 + 0.5) / image.1 as f32),
@@ -440,15 +437,20 @@ impl Render for Editor {
                         canvas(
                             |_, _, _| (),
                             move |_, (), window, _| {
-                                let pair = |p: Point<Pixels>| {
-                                    (f64::from(f32::from(p.x)), f64::from(f32::from(p.y)))
+                                let to_core = |p: Point<Pixels>| {
+                                    ImagePoint::new(
+                                        f64::from(f32::from(p.x)),
+                                        f64::from(f32::from(p.y)),
+                                    )
                                 };
                                 let mut path = PathBuilder::stroke(px(stroke));
-                                for (a, b) in
-                                    annotation::arrow_segments(pair(a), pair(b), f64::from(stroke))
-                                {
-                                    path.move_to(point(px(a.0 as f32), px(a.1 as f32)));
-                                    path.line_to(point(px(b.0 as f32), px(b.1 as f32)));
+                                for (a, b) in annotation::arrow_segments(
+                                    to_core(a),
+                                    to_core(b),
+                                    f64::from(stroke),
+                                ) {
+                                    path.move_to(point(px(a.x as f32), px(a.y as f32)));
+                                    path.line_to(point(px(b.x as f32), px(b.y as f32)));
                                 }
                                 if let Ok(path) = path.build() {
                                     window.paint_path(path, rgb(GUIDE_COLOR));
@@ -550,24 +552,27 @@ impl Render for Editor {
 mod tests {
     use gpui::{point, px, size};
 
-    use super::{image_bounds, image_point};
+    use super::{ImagePoint, image_bounds, image_point};
 
     #[test]
     fn preview_coordinates_round_trip_at_edges_and_center() {
         let image = (1920, 1080);
         let bounds = image_bounds(size(px(960.), px(680.)), image);
-        assert_eq!(image_point(bounds.origin, bounds, image), (0, 0));
+        assert_eq!(
+            image_point(bounds.origin, bounds, image),
+            ImagePoint::new(0, 0)
+        );
         assert_eq!(
             image_point(
                 bounds.origin + point(bounds.size.width / 2., bounds.size.height / 2.),
                 bounds,
                 image
             ),
-            (960, 540)
+            ImagePoint::new(960, 540)
         );
         assert_eq!(
             image_point(point(px(1500.), px(1100.)), bounds, image),
-            (1919, 1079)
+            ImagePoint::new(1919, 1079)
         );
     }
 }

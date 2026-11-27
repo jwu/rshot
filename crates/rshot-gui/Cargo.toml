@@ -1,0 +1,25 @@
+[package]
+name = "rshot-gui"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "rshot"
+path = "src/main.rs"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+anyhow.workspace = true
+block2.workspace = true
+futures-channel.workspace = true
+gpui.workspace = true
+image = { workspace = true, features = ["jpeg", "tiff"] }
+objc2.workspace = true
+objc2-app-kit = { workspace = true, features = ["block2", "NSAlert", "NSApplication", "NSButton", "NSControl", "NSGraphics", "NSResponder", "NSTextField", "NSView", "NSWindow"] }
+objc2-core-foundation.workspace = true
+objc2-core-graphics.workspace = true
+objc2-foundation.workspace = true
+raw-window-handle.workspace = true
+rshot-core.workspace = true
+
+[lints]
+workspace = true

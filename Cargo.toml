@@ -1,23 +1,28 @@
-[package]
-name = "rshot"
+[workspace]
+members = ["crates/rshot-core", "crates/rshot-gui"]
+resolver = "3"
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
 
-[target.'cfg(target_os = "macos")'.dependencies]
+[workspace.dependencies]
 anyhow = "1"
 block2 = "0.6"
 futures-channel = "0.3"
 gpui = { version = "0.2.2", default-features = false, features = ["runtime_shaders"] }
-image = { version = "0.25", default-features = false, features = ["jpeg", "png", "tiff"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
 objc2 = "0.6"
-objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "block2", "objc2-core-foundation", "objc2-core-graphics", "NSAlert", "NSApplication", "NSAttributedString", "NSButton", "NSColor", "NSControl", "NSFont", "NSGraphicsContext", "NSGraphics", "NSResponder", "NSStringDrawing", "NSTextField", "NSView", "NSWindow"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std"] }
 objc2-core-foundation = "0.3"
 objc2-core-graphics = "0.3"
 objc2-foundation = "0.3"
 objc2-screen-capture-kit = "0.3"
 raw-window-handle = "0.6"
+rshot-core = { path = "crates/rshot-core" }
+thiserror = "2"
 
-[lints.clippy]
+[workspace.lints.clippy]
 dbg_macro = "warn"
 
 [profile.dev]

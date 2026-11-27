@@ -1,16 +1,28 @@
 use std::{collections::VecDeque, ops::Range};
 
-use anyhow::{Result, ensure};
 use image::{
     RgbaImage,
     imageops::{crop_imm, replace},
 };
+use thiserror::Error;
 
 const MAX_PIXELS: u64 = 64_000_000;
 const ROW_SAMPLES: usize = 16;
 const MIN_OVERLAP: usize = 20;
 
 type Row = [u8; ROW_SAMPLES];
+
+#[derive(Debug, Error)]
+pub enum StitchError {
+    #[error("选区太小，无法匹配长截图")]
+    RegionTooSmall,
+    #[error("选区超过长截图大小上限")]
+    RegionTooLarge,
+    #[error("截图尺寸发生变化，请重新选区")]
+    FrameResized,
+    #[error("长截图已达 6400 万像素，请先导出")]
+    PixelLimit,
+}
 
 #[derive(Clone, Copy)]
 pub enum Axis {
@@ -48,16 +60,14 @@ pub struct Stitcher {
 }
 
 impl Stitcher {
-    pub fn new(axis: Axis, first: RgbaImage) -> Result<Self> {
+    pub fn new(axis: Axis, first: RgbaImage) -> Result<Self, StitchError> {
         let previous = axis.orient(first);
-        ensure!(
-            previous.width() >= 8 && previous.height() >= 32,
-            "选区太小，无法匹配长截图"
-        );
-        ensure!(
-            u64::from(previous.width()) * u64::from(previous.height()) <= MAX_PIXELS,
-            "选区超过长截图大小上限"
-        );
+        if previous.width() < 8 || previous.height() < 32 {
+            return Err(StitchError::RegionTooSmall);
+        }
+        if u64::from(previous.width()) * u64::from(previous.height()) > MAX_PIXELS {
+            return Err(StitchError::RegionTooLarge);
+        }
         Ok(Self {
             axis,
             previous,
@@ -69,12 +79,11 @@ impl Stitcher {
         })
     }
 
-    pub fn push(&mut self, frame: RgbaImage) -> Result<Progress> {
+    pub fn push(&mut self, frame: RgbaImage) -> Result<Progress, StitchError> {
         let frame = self.axis.orient(frame);
-        ensure!(
-            frame.dimensions() == self.previous.dimensions(),
-            "截图尺寸发生变化，请重新选区"
-        );
+        if frame.dimensions() != self.previous.dimensions() {
+            return Err(StitchError::FrameResized);
+        }
         if frame == self.previous {
             return Ok(Progress::Unchanged);
         }
@@ -105,10 +114,9 @@ impl Stitcher {
         let new_start = position.min(self.start);
         let new_end = (position + body_length).max(end);
         let total = new_end - new_start + i64::from(head + tail);
-        ensure!(
-            total as u64 * u64::from(frame.width()) <= MAX_PIXELS,
-            "长截图已达 6400 万像素，请先导出"
-        );
+        if total as u64 * u64::from(frame.width()) > MAX_PIXELS {
+            return Err(StitchError::PixelLimit);
+        }
         if self.edges.is_none() {
             self.edges = Some((
                 strip(&self.previous, 0..head),
@@ -191,11 +199,8 @@ impl Stitcher {
         let mut strips = self.strips().peekable();
         for y in 0..preview.height() {
             let source_y = (u64::from(y) * u64::from(height) / u64::from(preview.height())) as u32;
-            while strips
-                .peek()
-                .is_some_and(|strip| source_y >= offset + strip.height())
-            {
-                offset += strips.next().expect("checked by peek").height();
+            while let Some(strip) = strips.next_if(|strip| source_y >= offset + strip.height()) {
+                offset += strip.height();
             }
             if let Some(strip) = strips.peek() {
                 for x in 0..preview.width() {

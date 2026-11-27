@@ -1,11 +1,5 @@
 #[cfg(target_os = "macos")]
-mod annotation;
-#[cfg(target_os = "macos")]
-mod capture;
-#[cfg(target_os = "macos")]
 mod macos;
-#[cfg(target_os = "macos")]
-mod stitch;
 #[cfg(target_os = "macos")]
 mod ui;
 
