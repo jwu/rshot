@@ -12,10 +12,29 @@ use objc2_screen_capture_kit::{
 };
 use std::{sync::mpsc, time::Duration};
 
-use super::{bitmap::CGBitmapContextCreate, windows};
-use crate::capture::{CaptureBackend, CaptureError, CaptureTargets};
+use super::{bitmap::CGBitmapContextCreate, displays, windows};
+use crate::capture::{CaptureBackend, CaptureError, CaptureTargets, DisplayInfo, WindowInfo};
 
 pub struct MacOsCapture;
+
+impl MacOsCapture {
+    /// Lists active displays without requesting screen recording permission.
+    pub fn displays(&self) -> Result<Vec<DisplayInfo>, CaptureError> {
+        displays::displays()
+    }
+
+    /// Lists layer-zero windows at least 32 points wide and tall.
+    /// On-screen windows appear front to back, followed by off-screen windows.
+    pub fn windows(&self) -> Vec<WindowInfo> {
+        windows::windows(false)
+    }
+
+    /// Lists all WindowServer windows, including desktop elements and small windows.
+    /// On-screen windows appear front to back, followed by off-screen windows.
+    pub fn all_windows(&self) -> Vec<WindowInfo> {
+        windows::windows(true)
+    }
+}
 
 impl CaptureBackend for MacOsCapture {
     fn ready(&self) -> Result<(), CaptureError> {

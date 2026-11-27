@@ -38,6 +38,29 @@ pub enum CaptureError {
     RegionOutOfBounds,
 }
 
+/// An active display in the global top-left coordinate space, measured in points.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DisplayInfo {
+    pub id: u32,
+    pub bounds: Rect<f64>,
+    pub scale_factor: f64,
+    pub pixel_size: Size<u32>,
+    pub is_primary: bool,
+}
+
+/// A WindowServer window. Bounds are in global points with a top-left origin.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WindowInfo {
+    pub window_id: u32,
+    pub owner_name: String,
+    pub owner_pid: i32,
+    /// Absent for untitled windows and when WindowServer withholds the title.
+    pub title: Option<String>,
+    pub bounds: Rect<f64>,
+    pub layer: i32,
+    pub is_on_screen: bool,
+}
+
 /// Display-local bounds in logical coordinates, with windows ordered front to back.
 #[derive(Default)]
 pub struct CaptureTargets {

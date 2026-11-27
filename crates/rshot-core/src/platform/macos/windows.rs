@@ -1,29 +1,104 @@
+use std::collections::HashSet;
+
 use objc2_core_foundation::{
-    CFArray, CFDictionary, CFNumber, CFRetained, CFString, CFType, CGRect,
+    CFArray, CFBoolean, CFDictionary, CFNumber, CFRetained, CFString, CFType, CGRect,
 };
 use objc2_core_graphics::{
     CGDisplayBounds, CGRectMakeWithDictionaryRepresentation, CGWindowListCopyWindowInfo,
-    CGWindowListOption, kCGMainMenuWindowLevel, kCGWindowBounds, kCGWindowLayer, kCGWindowOwnerPID,
+    CGWindowListOption, kCGMainMenuWindowLevel, kCGWindowBounds, kCGWindowIsOnscreen,
+    kCGWindowLayer, kCGWindowName, kCGWindowNumber, kCGWindowOwnerName, kCGWindowOwnerPID,
 };
 
-use crate::{capture::CaptureTargets, geometry::Rect};
+use crate::{
+    capture::{CaptureTargets, WindowInfo},
+    geometry::Rect,
+};
+
+type WindowDictionary = CFDictionary<CFString, CFType>;
+
+fn window_list(options: CGWindowListOption) -> Option<CFRetained<CFArray<WindowDictionary>>> {
+    let windows = CGWindowListCopyWindowInfo(options, 0)?;
+    // CoreGraphics documents the array's elements as dictionaries with CF values.
+    Some(unsafe { CFRetained::cast_unchecked(windows) })
+}
+
+pub(super) fn windows(include_all: bool) -> Vec<WindowInfo> {
+    let mut windows: Vec<_> = window_list(CGWindowListOption::OptionOnScreenOnly)
+        .iter()
+        .flat_map(|list| list.iter())
+        .filter_map(|window| window_info(&window))
+        .collect();
+    let seen: HashSet<_> = windows.iter().map(|window| window.window_id).collect();
+    windows.extend(
+        window_list(CGWindowListOption::OptionAll)
+            .iter()
+            .flat_map(|list| list.iter())
+            .filter_map(|window| window_info(&window))
+            .filter(|window| !window.is_on_screen && !seen.contains(&window.window_id)),
+    );
+    if !include_all {
+        windows.retain(is_standard_window);
+    }
+    windows
+}
+
+fn is_standard_window(window: &WindowInfo) -> bool {
+    const MIN_WINDOW_POINTS: f64 = 32.;
+    window.layer == 0
+        && window.bounds.size.width >= MIN_WINDOW_POINTS
+        && window.bounds.size.height >= MIN_WINDOW_POINTS
+}
+
+fn window_info(window: &WindowDictionary) -> Option<WindowInfo> {
+    // These keys are immutable framework constants.
+    let (id, owner_name, owner_pid, title, layer, on_screen) = unsafe {
+        (
+            kCGWindowNumber,
+            kCGWindowOwnerName,
+            kCGWindowOwnerPID,
+            kCGWindowName,
+            kCGWindowLayer,
+            kCGWindowIsOnscreen,
+        )
+    };
+    let number = |key| window.get(key)?.downcast_ref::<CFNumber>()?.as_i64();
+    let text = |key| {
+        let value = window.get(key)?;
+        let value = value.downcast_ref::<CFString>()?.to_string();
+        (!value.is_empty()).then_some(value)
+    };
+    let bounds = window_bounds(window)?;
+    Some(WindowInfo {
+        window_id: number(id)?.try_into().ok()?,
+        owner_name: text(owner_name).unwrap_or_default(),
+        owner_pid: number(owner_pid)?.try_into().ok()?,
+        title: text(title),
+        bounds: Rect::new(
+            bounds.origin.x,
+            bounds.origin.y,
+            bounds.size.width,
+            bounds.size.height,
+        ),
+        layer: number(layer)?.try_into().ok()?,
+        is_on_screen: window.get(on_screen).is_some_and(|value| {
+            value
+                .downcast_ref::<CFBoolean>()
+                .is_some_and(CFBoolean::value)
+        }),
+    })
+}
 
 pub(super) fn capture_targets(display_id: u32) -> CaptureTargets {
-    let Some(windows) = CGWindowListCopyWindowInfo(
+    let Some(windows) = window_list(
         CGWindowListOption::OptionOnScreenOnly | CGWindowListOption::ExcludeDesktopElements,
-        0,
     ) else {
         return CaptureTargets::default();
     };
-    // CoreGraphics documents this array as window dictionaries with CF values, in front-to-back order.
-    type WindowInfo = CFDictionary<CFString, CFType>;
-    let windows = unsafe { CFRetained::cast_unchecked::<CFArray<WindowInfo>>(windows) };
     let display = CGDisplayBounds(display_id);
     let mut targets = CaptureTargets::default();
     for (layer, rect) in windows.iter().filter_map(|window| {
         // These keys are immutable framework constants.
-        let (layer_key, owner_key, bounds_key) =
-            unsafe { (kCGWindowLayer, kCGWindowOwnerPID, kCGWindowBounds) };
+        let (layer_key, owner_key) = unsafe { (kCGWindowLayer, kCGWindowOwnerPID) };
         let number = |key| window.get(key)?.downcast_ref::<CFNumber>()?.as_i32();
         let layer = number(layer_key)?;
         if (layer != 0 && layer != kCGMainMenuWindowLevel)
@@ -31,14 +106,7 @@ pub(super) fn capture_targets(display_id: u32) -> CaptureTargets {
         {
             return None;
         }
-        let value = window.get(bounds_key)?;
-        let bounds = value.downcast_ref::<CFDictionary>()?;
-        let mut rect = CGRect::default();
-        // CoreGraphics initializes the writable rectangle with the dictionary's window bounds.
-        if !unsafe { CGRectMakeWithDictionaryRepresentation(Some(bounds), &mut rect) } {
-            return None;
-        }
-        local_rect(rect, display).map(|rect| (layer, rect))
+        local_rect(window_bounds(&window)?, display).map(|rect| (layer, rect))
     }) {
         if layer == 0 {
             targets.windows.push(rect);
@@ -48,6 +116,14 @@ pub(super) fn capture_targets(display_id: u32) -> CaptureTargets {
         }
     }
     targets
+}
+
+fn window_bounds(window: &WindowDictionary) -> Option<CGRect> {
+    let value = window.get(unsafe { kCGWindowBounds })?;
+    let bounds = value.downcast_ref::<CFDictionary>()?;
+    let mut rect = CGRect::default();
+    // CoreGraphics initializes the writable rectangle with the dictionary's window bounds.
+    unsafe { CGRectMakeWithDictionaryRepresentation(Some(bounds), &mut rect) }.then_some(rect)
 }
 
 fn local_rect(window: CGRect, display: CGRect) -> Option<Rect<f64>> {
@@ -62,7 +138,29 @@ fn local_rect(window: CGRect, display: CGRect) -> Option<Rect<f64>> {
 mod tests {
     use objc2_core_foundation::{CGPoint, CGSize};
 
-    use super::{CGRect, Rect, local_rect};
+    use super::{CGRect, Rect, WindowInfo, is_standard_window, local_rect};
+
+    #[test]
+    fn filters_nonstandard_layers_and_tiny_windows() {
+        let mut window = WindowInfo {
+            window_id: 42,
+            owner_name: "Example".into(),
+            owner_pid: 2,
+            title: None,
+            bounds: Rect::new(-300., 20., 32., 32.),
+            layer: 0,
+            is_on_screen: false,
+        };
+        assert!(is_standard_window(&window));
+        window.layer = 1;
+        assert!(!is_standard_window(&window));
+        window.layer = 0;
+        window.bounds.size.width = 31.;
+        assert!(!is_standard_window(&window));
+        window.bounds.size.width = 100.;
+        window.bounds.size.height = 0.;
+        assert!(!is_standard_window(&window));
+    }
 
     #[test]
     fn clips_a_window_to_a_display_with_negative_origin() {
