@@ -1,9 +1,12 @@
 use rshot_core::{
     annotation::TextError,
     capture::CaptureError,
+    elements::ElementError,
     ocr::{Match, OcrError, RecognitionLevel},
 };
 use serde::Serialize;
+
+pub const UNLOCK_HINT: &str = "The screen may be locked or asleep; unlock it and retry";
 
 #[repr(u8)]
 pub enum ExitStatus {
@@ -90,6 +93,12 @@ impl From<CaptureError> for CliError {
                 "Screen recording permission is required.",
             )
             .with_hint("Grant screen recording permission in System Settings, then restart Rshot."),
+            CaptureError::ScreenLocked => Self::new(
+                ExitStatus::Capture,
+                "screen_locked",
+                "The screen is locked.",
+            )
+            .with_hint(UNLOCK_HINT),
             CaptureError::DisplayNotFound => Self::new(
                 ExitStatus::TargetNotFound,
                 "display_not_found",
@@ -122,6 +131,23 @@ impl From<OcrError> for CliError {
             }
             _ => Self::new(ExitStatus::Capture, "ocr_failed", message),
         }
+    }
+}
+
+impl From<ElementError> for CliError {
+    fn from(error: ElementError) -> Self {
+        let (status, kind) = match error {
+            ElementError::ScreenLocked => return CaptureError::ScreenLocked.into(),
+            ElementError::AccessibilityDenied => {
+                return Self::new(ExitStatus::Capture, "accessibility_denied", error.to_string())
+                    .with_hint("Grant Accessibility permission to your terminal or calling app in System Settings > Privacy & Security > Accessibility, then relaunch it.");
+            }
+            ElementError::ElementNotFound => (ExitStatus::TargetNotFound, "element_not_found"),
+            ElementError::WindowNotFound(_) => (ExitStatus::TargetNotFound, "window_not_found"),
+            ElementError::Timeout { .. } => (ExitStatus::Capture, "accessibility_timeout"),
+            ElementError::Ax { .. } => (ExitStatus::Capture, "accessibility_failed"),
+        };
+        Self::new(status, kind, error.to_string())
     }
 }
 
@@ -164,6 +190,42 @@ mod tests {
             2
         );
         assert_eq!(CliError::from(TextError::TooTall).exit_code(), 3);
+    }
+
+    #[test]
+    fn accessibility_errors_use_capture_and_target_statuses() {
+        for (error, status, kind) in [
+            (ElementError::AccessibilityDenied, 4, "accessibility_denied"),
+            (ElementError::ScreenLocked, 4, "screen_locked"),
+            (ElementError::ElementNotFound, 6, "element_not_found"),
+            (ElementError::WindowNotFound(42), 6, "window_not_found"),
+            (
+                ElementError::Timeout {
+                    operation: "AXChildren",
+                },
+                4,
+                "accessibility_timeout",
+            ),
+            (
+                ElementError::Ax {
+                    operation: "AXChildren",
+                    code: -25200,
+                },
+                4,
+                "accessibility_failed",
+            ),
+        ] {
+            let error = CliError::from(error);
+            assert_eq!((error.exit_code(), error.kind), (status, kind));
+        }
+        let denied = CliError::from(ElementError::AccessibilityDenied);
+        assert!(denied.hint.unwrap().contains(
+            "your terminal or calling app in System Settings > Privacy & Security > Accessibility"
+        ));
+        assert_eq!(
+            CliError::from(ElementError::ScreenLocked).hint.as_deref(),
+            Some(UNLOCK_HINT)
+        );
     }
 
     #[test]

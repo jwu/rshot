@@ -7,14 +7,16 @@ use std::{
 };
 
 use rshot_core::{
-    capture::{CaptureError, CaptureSource, CapturedImage, MacOsCapture},
-    geometry::Rect,
+    capture::{CaptureError, CaptureSource, CapturedImage, DisplayInfo, MacOsCapture},
+    elements::{ElementError, ElementInfo, element_at},
+    geometry::{Point, Rect},
     png,
 };
 use serde_json::{Map, Value, json};
 
+use super::elements::parse_point;
 use crate::{
-    error::{CliError, ExitStatus},
+    error::{CliError, ExitStatus, UNLOCK_HINT},
     output::{CommandOutput, ImageArtifact},
 };
 
@@ -29,6 +31,9 @@ pub struct Args {
     /// Window ID from the windows command.
     #[arg(long, value_name = "ID", conflicts_with_all = ["display", "region"])]
     window: Option<u32>,
+    /// Capture the accessibility element at a point in global screen coordinates.
+    #[arg(long, value_name = "X,Y", value_parser = parse_point, allow_hyphen_values = true, conflicts_with_all = ["display", "region", "window"])]
+    element_at: Option<Point<f64>>,
     /// Wait this many milliseconds before capturing.
     #[arg(long, value_name = "N", default_value_t = 0)]
     delay_ms: u64,
@@ -40,8 +45,19 @@ pub struct Args {
 pub fn run(args: Args) -> Result<CommandOutput, CliError> {
     let capture = MacOsCapture;
     if args.delay_ms > 0 {
-        capture.check_capture_available().map_err(capture_error)?;
+        if args.element_at.is_none() {
+            capture.check_capture_available().map_err(capture_error)?;
+        }
         thread::sleep(Duration::from_millis(args.delay_ms));
+    }
+    if let Some(point) = args.element_at {
+        let hit = element_at(point)?;
+        let displays = capture.displays().map_err(capture_error)?;
+        let (display_id, region) = element_region(point, hit.element.bounds, &displays)?;
+        let captured = capture
+            .capture_region(Some(display_id), region)
+            .map_err(capture_error)?;
+        return save_capture(captured, args.out, Some(&hit.element));
     }
     let captured = match (args.window, args.region) {
         (Some(window_id), _) => capture.capture_window(window_id),
@@ -49,7 +65,34 @@ pub fn run(args: Args) -> Result<CommandOutput, CliError> {
         (None, None) => capture.capture_display(args.display),
     }
     .map_err(capture_error)?;
-    save_capture(captured, args.out)
+    save_capture(captured, args.out, None)
+}
+
+fn element_region(
+    point: Point<f64>,
+    bounds: Rect<f64>,
+    displays: &[DisplayInfo],
+) -> Result<(u32, Rect<f64>), CliError> {
+    let display = displays
+        .iter()
+        .find(|display| {
+            let frame = display.bounds;
+            (frame.origin.x..frame.origin.x + frame.size.width).contains(&point.x)
+                && (frame.origin.y..frame.origin.y + frame.size.height).contains(&point.y)
+        })
+        .ok_or(CaptureError::DisplayNotFound)?;
+    let clipped = bounds
+        .intersection(display.bounds)
+        .ok_or(ElementError::ElementNotFound)?;
+    Ok((
+        display.id,
+        Rect::new(
+            clipped.origin.x - display.bounds.origin.x,
+            clipped.origin.y - display.bounds.origin.y,
+            clipped.size.width,
+            clipped.size.height,
+        ),
+    ))
 }
 
 fn parse_region(value: &str) -> Result<Rect<f64>, &'static str> {
@@ -69,14 +112,11 @@ fn parse_region(value: &str) -> Result<Rect<f64>, &'static str> {
     Ok(Rect::new(*x, *y, *w, *h))
 }
 
-fn capture_error(error: CaptureError) -> CliError {
-    const UNLOCK_HINT: &str = "The screen may be locked or asleep; unlock it and retry";
+pub(super) fn capture_error(error: CaptureError) -> CliError {
     match error {
         CaptureError::PermissionDenied => CliError::from(error).with_hint(
             "Grant screen recording permission to your terminal or calling app in System Settings > Privacy & Security > Screen & System Audio Recording, then relaunch it.",
         ),
-        CaptureError::ScreenLocked => CliError::new(ExitStatus::Capture, "screen_locked", "The screen is locked.")
-            .with_hint(UNLOCK_HINT),
         CaptureError::NoActiveDisplay => CliError::new(ExitStatus::Capture, "no_active_display", "No active display is available.")
             .with_hint(UNLOCK_HINT),
         CaptureError::WindowNotFound(window_id) => CliError::new(
@@ -91,6 +131,7 @@ fn capture_error(error: CaptureError) -> CliError {
 fn save_capture(
     captured: CapturedImage,
     output: Option<PathBuf>,
+    element: Option<&ElementInfo>,
 ) -> Result<CommandOutput, CliError> {
     let (path, temp_dir) = match output {
         Some(path) => (path, None),
@@ -126,6 +167,9 @@ fn save_capture(
     ]);
     if let CaptureSource::Window { window_id } = metadata.source {
         capture.insert("window_id".into(), json!(window_id));
+    }
+    if let Some(element) = element {
+        capture.insert("element".into(), json!(element));
     }
     let fields = Map::from_iter([
         ("image".into(), json!(artifact)),
@@ -275,7 +319,7 @@ mod tests {
             (display, json!({"source":"display", "display_id":1})),
             (region, json!({"source":"region", "display_id":1})),
         ] {
-            let output = save_capture(captured, None).unwrap();
+            let output = save_capture(captured, None, None).unwrap();
             let mut stdout = Vec::new();
             let code = emit("capture", true, Ok(output), &mut stdout, &mut Vec::new()).unwrap();
             assert_eq!(code, 0);
@@ -295,9 +339,81 @@ mod tests {
     }
 
     #[test]
+    fn accepts_negative_element_points_and_rejects_other_targets() {
+        let args = TestArgs::try_parse_from(["capture", "--element-at", "-1,2"])
+            .unwrap()
+            .capture;
+        assert_eq!(args.element_at, Some(Point::new(-1., 2.)));
+        for (flag, value) in [
+            ("--display", "1"),
+            ("--region", "0,0,10,10"),
+            ("--window", "2"),
+        ] {
+            let error = TestArgs::try_parse_from(["capture", "--element-at", "-1,2", flag, value])
+                .err()
+                .unwrap();
+            assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+        }
+    }
+
+    #[test]
+    fn clips_element_capture_to_the_display_containing_the_hit() {
+        let display = |id, x, is_primary| DisplayInfo {
+            id,
+            bounds: Rect::new(x, 0., 100., 100.),
+            scale_factor: 2.,
+            pixel_size: Size {
+                width: 200,
+                height: 200,
+            },
+            is_primary,
+        };
+        let displays = [display(1, 0., true), display(2, -100., false)];
+        let bounds = Rect::new(-10.5, 10., 30., 15.);
+        assert_eq!(
+            element_region(Point::new(-1., 11.), bounds, &displays).unwrap(),
+            (2, Rect::new(89.5, 10., 10.5, 15.))
+        );
+        assert_eq!(
+            element_region(Point::new(0., 11.), bounds, &displays).unwrap(),
+            (1, Rect::new(0., 10., 19.5, 15.))
+        );
+    }
+
+    #[test]
+    fn includes_the_matched_element_in_region_capture_metadata() {
+        let captured = fixture(CaptureSource::Region, Some(1));
+        let element = ElementInfo {
+            role: "AXButton".into(),
+            subrole: None,
+            title: None,
+            description: None,
+            value: None,
+            identifier: None,
+            bounds: Rect::new(-9.75, -5., 1.5, 1.),
+            enabled: Some(true),
+            focused: None,
+        };
+        let output = save_capture(captured, None, Some(&element)).unwrap();
+        let mut stdout = Vec::new();
+        assert_eq!(
+            emit("capture", true, Ok(output), &mut stdout, &mut Vec::new()).unwrap(),
+            0
+        );
+        let json: Value = serde_json::from_slice(&stdout).unwrap();
+        assert_eq!(json["capture"]["source"], "region");
+        assert_eq!(
+            json["capture"]["bounds"],
+            json!(Rect::new(-10., -5., 2., 1.))
+        );
+        assert_eq!(json["capture"]["element"], json!(element));
+        fs::remove_file(json["image"]["path"].as_str().unwrap()).unwrap();
+    }
+
+    #[test]
     fn a_save_failure_exits_with_io_status() {
         let captured = fixture(CaptureSource::Display, Some(1));
-        let error = save_capture(captured, Some(env::temp_dir())).unwrap_err();
+        let error = save_capture(captured, Some(env::temp_dir()), None).unwrap_err();
         assert_eq!((error.exit_code(), error.kind), (1, "io_error"));
     }
 }

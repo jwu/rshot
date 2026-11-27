@@ -8,7 +8,7 @@ mod output;
 #[cfg(target_os = "macos")]
 use {
     clap::{CommandFactory, Parser, Subcommand, error::ErrorKind},
-    commands::{annotate, capture, grid, locate, ocr, windows, zoom},
+    commands::{annotate, capture, elements, grid, locate, ocr, windows, zoom},
     error::{CliError, ExitStatus},
     output::{CommandOutput, emit},
     std::{ffi::OsString, io, process::ExitCode},
@@ -31,10 +31,12 @@ struct Args {
 #[cfg(target_os = "macos")]
 #[derive(Subcommand)]
 enum Command {
-    /// Capture a screen, window, or region.
+    /// Capture a display, window, region, or accessibility element.
     Capture(capture::Args),
     /// List windows.
     Windows(windows::Args),
+    /// Locate accessibility elements.
+    Elements(elements::Args),
     /// Annotate an image.
     Annotate(annotate::Args),
     /// Draw a grid over an image.
@@ -55,6 +57,7 @@ fn main() -> ExitCode {
             let (command, result) = match args.command {
                 Command::Capture(args) => ("capture", capture::run(args)),
                 Command::Windows(args) => ("windows", windows::run(args)),
+                Command::Elements(args) => ("elements", elements::run(args)),
                 Command::Annotate(args) => ("annotate", annotate::run(args)),
                 Command::Grid(args) => ("grid", grid::run(args)),
                 Command::Zoom(args) => ("zoom", zoom::run(args)),
