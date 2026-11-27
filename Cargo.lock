@@ -4023,6 +4023,7 @@ dependencies = [
  "objc2-foundation",
  "objc2-screen-capture-kit",
  "objc2-vision",
+ "png 0.18.1",
  "serde",
  "serde_json",
  "serde_path_to_error",

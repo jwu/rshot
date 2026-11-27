@@ -1,6 +1,5 @@
 use std::{
-    env, fs,
-    io::{self, Write},
+    env, fs, io,
     path::PathBuf,
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -146,12 +145,11 @@ fn save_capture(
     };
     let metadata = captured.metadata;
     let artifact = ImageArtifact::new(path, metadata.pixel_size.width, metadata.pixel_size.height)?;
-    let png = png::encode(&captured.image)?;
     if let Some(dir) = temp_dir {
         fs::create_dir_all(dir)?;
-        fs::File::create_new(artifact.path())?.write_all(&png)?;
+        png::save_new(&captured.image, artifact.path())?;
     } else {
-        fs::write(artifact.path(), png)?;
+        png::save(&captured.image, artifact.path())?;
     }
 
     let source = match metadata.source {
