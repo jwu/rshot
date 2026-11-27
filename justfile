@@ -14,10 +14,10 @@ fmt-check:
     cargo fmt --all -- --check
 
 lint:
-    cargo clippy --workspace --all-targets --all-features -- -D warnings
+    cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 
 test:
-    if cargo nextest --version >/dev/null 2>&1; then cargo nextest run --workspace; else cargo test --workspace; fi
+    if cargo nextest --version >/dev/null 2>&1; then cargo nextest run --locked --workspace; else cargo test --locked --workspace; fi
 
 check: fmt-check lint test
 
