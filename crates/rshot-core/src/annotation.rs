@@ -4,6 +4,7 @@ use image::{Pixel, Rgba, RgbaImage, imageops::replace};
 
 use crate::geometry::Point;
 
+mod blur;
 mod render;
 pub mod spec;
 

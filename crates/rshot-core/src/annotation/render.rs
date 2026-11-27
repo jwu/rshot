@@ -1,4 +1,4 @@
-use image::{GrayImage, Rgba, Rgba32FImage, RgbaImage, imageops};
+use image::{GrayImage, Rgba, RgbaImage, imageops};
 use serde::Serialize;
 use tiny_skia::{FillRule, Mask, Path, PathBuilder, Transform};
 
@@ -6,7 +6,7 @@ use super::spec::{
     AnnotateError, Color, HighlightBlend, MagnifySpec, MarkKind, MarkSpec, Spec, SpotlightShape,
     SpotlightSpec, step_number,
 };
-use super::{LineCoverage, arrow_segments, mosaic};
+use super::{LineCoverage, arrow_segments, blur, mosaic};
 use crate::geometry::{Point, Rect};
 use crate::locate::CoordinateMapping;
 
@@ -433,24 +433,7 @@ impl Canvas<'_> {
         if width == 0 || height == 0 {
             return;
         }
-        let premultiplied = Rgba32FImage::from_fn(width, height, |col, row| {
-            let [r, g, b, a] = self
-                .image
-                .get_pixel(x + col, y + row)
-                .0
-                .map(|c| f32::from(c) / 255.);
-            Rgba([r * a, g * a, b * a, a])
-        });
-        let blurred = imageops::fast_blur(&premultiplied, radius.min(width.max(height)) as f32);
-        for (col, row, &Rgba([r, g, b, a])) in blurred.enumerate_pixels() {
-            let byte = |channel: f32| (channel * 255.).round() as u8;
-            let pixel = if byte(a) == 0 {
-                Rgba([0; 4])
-            } else {
-                Rgba([byte(r / a), byte(g / a), byte(b / a), byte(a)])
-            };
-            self.image.put_pixel(x + col, y + row, pixel);
-        }
+        blur::blur(self.image, region, radius);
         self.include(x, y);
         self.include(x + width - 1, y + height - 1);
     }
