@@ -4,6 +4,9 @@ use image::{Pixel, Rgba, RgbaImage, imageops::replace};
 
 use crate::geometry::Point;
 
+pub mod spec;
+pub use spec::{AnnotateError, Spec};
+
 #[cfg(target_os = "macos")]
 use crate::platform::macos::text::draw_text;
 
