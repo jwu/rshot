@@ -57,6 +57,21 @@ impl<T> From<Rect<T>> for RectFields<T> {
     }
 }
 
+impl Rect<i64> {
+    pub(crate) fn clip(self, (width, height): (u32, u32)) -> Rect<u32> {
+        let Point { x, y } = self.origin;
+        let clip_x = |x: i64| x.clamp(0, i64::from(width)) as u32;
+        let clip_y = |y: i64| y.clamp(0, i64::from(height)) as u32;
+        let (left, top) = (clip_x(x), clip_y(y));
+        Rect::new(
+            left,
+            top,
+            clip_x(x + self.size.width) - left,
+            clip_y(y + self.size.height) - top,
+        )
+    }
+}
+
 impl<T> Rect<T> {
     pub fn new(x: T, y: T, width: T, height: T) -> Self {
         Self {

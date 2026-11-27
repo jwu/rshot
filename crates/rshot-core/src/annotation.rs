@@ -4,7 +4,10 @@ use image::{Pixel, Rgba, RgbaImage, imageops::replace};
 
 use crate::geometry::Point;
 
+mod render;
 pub mod spec;
+
+pub use render::{LegendEntry, RenderWarning, Rendered, RenderedMark, render};
 pub use spec::{AnnotateError, Spec};
 
 #[cfg(target_os = "macos")]
@@ -160,18 +163,14 @@ fn arrow(image: &mut RgbaImage, start: Point<u32>, end: Point<u32>, stroke: f64)
 }
 
 fn line(image: &mut RgbaImage, a: Point<f64>, b: Point<f64>, stroke: f64, color: [u8; 3]) {
-    let radius = stroke / 2. + 0.5;
-    let (dx, dy) = (b.x - a.x, b.y - a.y);
-    let length_sq = (dx * dx + dy * dy).max(f64::EPSILON);
-    let left = (a.x.min(b.x) - radius).floor() as u32;
-    let right = ((a.x.max(b.x) + radius).ceil() as u32).min(image.width());
-    let top = (a.y.min(b.y) - radius).floor() as u32;
-    let bottom = ((a.y.max(b.y) + radius).ceil() as u32).min(image.height());
+    let line = LineCoverage::new(a, b, stroke);
+    let left = (a.x.min(b.x) - line.radius).floor() as u32;
+    let right = ((a.x.max(b.x) + line.radius).ceil() as u32).min(image.width());
+    let top = (a.y.min(b.y) - line.radius).floor() as u32;
+    let bottom = ((a.y.max(b.y) + line.radius).ceil() as u32).min(image.height());
     for y in top..bottom {
         for x in left..right {
-            let (px, py) = (f64::from(x) + 0.5 - a.x, f64::from(y) + 0.5 - a.y);
-            let t = ((px * dx + py * dy) / length_sq).clamp(0., 1.);
-            let coverage = (radius - (px - t * dx).hypot(py - t * dy)).clamp(0., 1.);
+            let coverage = line.at(x, y);
             if coverage > 0. {
                 image.get_pixel_mut(x, y).blend(&Rgba([
                     color[0],
@@ -181,6 +180,35 @@ fn line(image: &mut RgbaImage, a: Point<f64>, b: Point<f64>, stroke: f64, color:
                 ]));
             }
         }
+    }
+}
+
+struct LineCoverage {
+    start: Point<f64>,
+    delta: Point<f64>,
+    length_sq: f64,
+    radius: f64,
+}
+
+impl LineCoverage {
+    fn new(start: Point<f64>, end: Point<f64>, stroke: f64) -> Self {
+        let delta = Point::new(end.x - start.x, end.y - start.y);
+        Self {
+            start,
+            delta,
+            length_sq: (delta.x * delta.x + delta.y * delta.y).max(f64::EPSILON),
+            radius: stroke / 2. + 0.5,
+        }
+    }
+
+    fn at(&self, x: u32, y: u32) -> f64 {
+        let (px, py) = (
+            f64::from(x) + 0.5 - self.start.x,
+            f64::from(y) + 0.5 - self.start.y,
+        );
+        let Point { x: dx, y: dy } = self.delta;
+        let t = ((px * dx + py * dy) / self.length_sq).clamp(0., 1.);
+        (self.radius - (px - t * dx).hypot(py - t * dy)).clamp(0., 1.)
     }
 }
 

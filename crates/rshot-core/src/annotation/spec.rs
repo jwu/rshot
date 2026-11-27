@@ -18,10 +18,22 @@ pub enum AnnotateError {
         field: String,
         message: String,
     },
+    #[cfg(target_os = "macos")]
+    #[error("marks[{index}].{field}: could not rasterize text")]
+    Text {
+        index: usize,
+        field: &'static str,
+        #[source]
+        source: super::TextError,
+    },
 }
 
 impl AnnotateError {
-    fn field(index: usize, field: impl Into<String>, message: impl Into<String>) -> Self {
+    pub(super) fn field(
+        index: usize,
+        field: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Self {
         Self::Field {
             index,
             field: field.into(),
@@ -269,6 +281,7 @@ pub struct TextSpec {
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct StepSpec {
+    /// Upper-left corner of the square containing the circular badge.
     pub at: Point<i32>,
     #[serde(default)]
     pub n: Option<u32>,
