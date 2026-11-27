@@ -34,3 +34,8 @@ dbg_macro = "warn"
 
 [profile.dev]
 debug = "line-tables-only"
+
+[profile.release]
+strip = "debuginfo"
+lto = "thin"
+codegen-units = 1
