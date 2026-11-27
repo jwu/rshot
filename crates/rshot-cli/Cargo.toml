@@ -1,0 +1,13 @@
+[package]
+name = "rshot-cli"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+rshot-core.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+clap.workspace = true
+
+[lints]
+workspace = true

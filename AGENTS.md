@@ -32,5 +32,5 @@
 The Cargo workspace contains these crates.
 
 - `crates/rshot-core` handles screenshot capture, annotation models, and rendering.
-- `crates/rshot-cli` serves AI agents. It produces PNG images and JSON metadata, keeps standard output machine-readable, sends diagnostics to standard error, and exits with a nonzero status on failure.
+- `crates/rshot-cli` provides the command-line interface for AI agents. It currently exposes help and version information. Keep standard output machine-readable, send diagnostics to standard error, and exit with a nonzero status on failure.
 - `crates/rshot-gui` provides the graphical interface.
